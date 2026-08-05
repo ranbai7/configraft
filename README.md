@@ -107,7 +107,7 @@ Configraft 是一个轻量级、**强一致**的分布式键值存储系统，�
 ### 一键启动 3 节点集群
 
 ```bash
-git clone https://github.com/<your-name>/configraft.git
+git clone https://github.com/ranbai7/configraft.git
 cd configraft
 docker compose up -d
 ```
@@ -221,7 +221,7 @@ configraft/
 
 ```bash
 # 依赖：brpc、braft、leveldb、protobuf（建议 vcpkg 安装固定版本）
-git clone https://github.com/<your-name>/configraft.git
+git clone https://github.com/ranbai7/configraft.git
 cd configraft
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
