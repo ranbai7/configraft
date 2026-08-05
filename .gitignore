@@ -1,0 +1,35 @@
+# Build
+build/
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.exe
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+Makefile
+
+# Test / bench / perf output
+*.prof
+perf.data
+perf.data.old
+flamegraph-*.svg
+*.html
+
+# IDE / OS / Claude Code
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local-only files (不进仓库)
+项目概述.docx
