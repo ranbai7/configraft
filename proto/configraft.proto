@@ -1,0 +1,155 @@
+// Configraft 分布式配置中心 —— 协议定义
+//
+// 设计原则：
+//   1. 对外协议 gRPC + HTTP(REST)，均由 brpc 单端口承载；
+//   2. Watch 采用 HTTP 长轮询（见概述决策 #2），不定义 gRPC 流式 RPC；
+//   3. RaftCmd 为写入复制日志的内部指令（状态机 on_apply 消费），
+//      与对外 API message 分离，避免协议耦合。
+syntax = "proto3";
+
+package configraft.v1;
+
+// 生成 service 的 C++ 基类（brpc 依赖 protobuf 的 generic service 机制）
+option cc_generic_services = true;
+
+// ---------------- 状态码 ----------------
+enum Code {
+  OK               = 0;
+  KEY_NOT_FOUND    = 1;
+  CAS_FAILED       = 2;   // CAS 期望值不匹配
+  NOT_LEADER       = 3;   // 写请求落到了 Follower
+  VERSION_NOT_FOUND= 4;   // 指定版本不存在（已被 Compaction 回收等）
+  COMPACTED        = 5;   // from_revision 之前的历史已被回收
+  INTERNAL         = 100; // 内部错误
+}
+
+// ---------------- 通用 KV ----------------
+message KV {
+  string key       = 1;
+  string value     = 2;
+  int64  version   = 3;   // 该 key 的修改序号（从 1 起）
+  int64  revision  = 4;   // 本次写入时的全局 revision（逻辑时钟）
+  bool   deleted   = 5;   // tombstone：该 key 已被删除
+}
+
+// ---------------- KV 服务 ----------------
+message PutRequest  { string key = 1; string value = 2; }
+message GetRequest  { string key = 1; bool serializable = 2; }  // serializable=true 允许 Follower 本地读
+message DeleteRequest { string key = 1; }
+message BatchPutRequest { repeated PutRequest entries = 1; }
+message CompareAndSwapRequest { string key = 1; string expect = 2; string value = 3; }
+
+message KVResponse {
+  int32  code    = 1;
+  string message = 2;
+  KV     kv      = 3;         // 单条结果
+  repeated KV kvs = 4;        // 批量结果
+}
+
+// RESTful HTTP 统一入口（brpc restful 映射不支持 HTTP 方法前缀，
+// 同路径不同方法的语义在 Rest 方法内按 method + unresolved_path 分发）。
+// 请求字段全部来自 HTTP 路径与 body（body 经 json2pb 解析），故请求体为空。
+message KVHttpRequest {}
+
+service KVService {
+  rpc Put(PutRequest) returns (KVResponse);
+  rpc Get(GetRequest) returns (KVResponse);
+  rpc Delete(DeleteRequest) returns (KVResponse);
+  rpc BatchPut(BatchPutRequest) returns (KVResponse);
+  rpc CompareAndSwap(CompareAndSwapRequest) returns (KVResponse);
+  rpc Rest(KVHttpRequest) returns (KVResponse);
+}
+
+// ---------------- 配置管理服务（多版本发布 / 历史查询 / 回滚） ----------------
+message PublishRequest { string key = 1; string value = 2; }
+message GetConfigRequest { string key = 1; int64 version = 2; }  // version=0 表示最新版本
+message RollbackRequest { string key = 1; int64 target_version = 2; }
+
+message ConfigResponse {
+  int32  code    = 1;
+  string message = 2;
+  KV     kv      = 3;          // Publish / GetConfig / Rollback 的当前 KV
+  repeated KV history = 4;     // GetConfig 可返回该 key 的全部历史版本
+}
+
+service ConfigService {
+  rpc Publish(PublishRequest) returns (ConfigResponse);
+  rpc GetConfig(GetConfigRequest) returns (ConfigResponse);
+  rpc Rollback(RollbackRequest) returns (ConfigResponse);
+}
+
+// ---------------- Watch 服务（HTTP 长轮询，见概述决策 #2） ----------------
+message WatchRequest {
+  string key            = 1;   // 空串表示监听所有 key
+  int64  from_revision  = 2;   // 从该 revision 之后的事件开始（断点续传锚点）
+  int64  timeout_ms     = 3;   // 长轮询最长等待时间，默认 30000
+}
+
+message WatchEvent {
+  int64  revision = 1;   // 产生该事件的全局 revision
+  string key      = 2;
+  string value    = 3;
+  int64  version  = 4;
+  string type     = 5;   // "PUT" / "DELETE"
+}
+
+message WatchResponse {
+  int32  code            = 1;
+  string message         = 2;
+  int64  current_revision = 3;   // 当前集群最新 revision
+  repeated WatchEvent events = 4;
+}
+
+service WatchService {
+  rpc Watch(WatchRequest) returns (WatchResponse);
+}
+
+// ---------------- 运维管理服务 ----------------
+message GetHealthRequest {}
+
+message GetHealthResponse {
+  int32  code    = 1;
+  string message = 2;
+  string role    = 3;         // leader / follower / candidate
+  int64  term    = 4;
+  int64  commit_index  = 5;
+  int64  applied_index = 6;
+  string leader_id = 7;       // 当前已知 leader 的地址
+  repeated string peers = 8;  // 集群成员
+}
+
+message AddPeerRequest { string peer = 1; }     // 形如 "127.0.0.1:8004"
+message RemovePeerRequest { string peer = 1; }
+message AdminResponse { int32 code = 1; string message = 2; }
+
+service AdminService {
+  rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
+  rpc AddPeer(AddPeerRequest) returns (AdminResponse);
+  rpc RemovePeer(RemovePeerRequest) returns (AdminResponse);
+}
+
+// ---------------- Raft 内部指令（写入复制日志，状态机串行 apply） ----------------
+message RaftCmd {
+  message PutCmd     { string key = 1; string value = 2; }
+  message DeleteCmd  { string key = 1; }
+  message CompareAndSwapCmd { string key = 1; string expect = 2; string value = 3; }
+  message PublishCmd { string key = 1; string value = 2; }
+  message RollbackCmd{ string key = 1; int64 target_version = 2; }
+  message BatchPutCmd { repeated PutCmd puts = 1; }
+
+  oneof cmd {
+    PutCmd put = 1;
+    DeleteCmd delete = 2;
+    CompareAndSwapCmd cas = 3;
+    PublishCmd publish = 4;
+    RollbackCmd rollback = 5;
+    BatchPutCmd batch_put = 6;
+  }
+}
+
+// 内部：状态机快照数据（braft on_snapshot_save/load 使用）。
+// 只包含主索引（全部当前 KV）+ 全局 revision；历史版本可由后续日志重建。
+message SnapshotData {
+  int64 revision = 1;
+  repeated KV kvs = 2;
+}

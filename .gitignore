@@ -9,6 +9,14 @@ cmake-build-*/
 *.dylib
 *.exe
 
+# 第三方依赖（源码与安装产物均不入库）
+third_party/
+third_party/src/
+
+# 运行时数据
+data/
+logs/
+
 # CMake
 CMakeCache.txt
 CMakeFiles/
