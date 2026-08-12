@@ -10,11 +10,14 @@
 
 namespace configraft {
 
+class WatchHub;  // watch/watch_hub.h
+
 // 集群模式的 ConfigNode：写路径经 braft 复制日志同步提交，读路径走本地状态机。
 // 与 LocalNode 共用 ApplyCmdToStore（保证状态变更逻辑一致）。
+// hub_（非拥有）注入状态机用于 on_apply 广播 Watch 事件，并供本节点实现长轮询。
 class RaftNode : public ConfigNode {
 public:
-    RaftNode();
+    explicit RaftNode(WatchHub* hub);
     ~RaftNode() override;
 
     RaftNode(const RaftNode&) = delete;
@@ -39,6 +42,9 @@ public:
     void Apply(const RaftCmd& cmd, ApplyResult* out) override;
     void Get(const std::string& key, bool serializable, GetResult* out) override;
     void GetConfig(const std::string& key, int64_t version, ConfigResult* out) override;
+    void Watch(const std::string& key, int64_t from_revision, int64_t timeout_ms,
+               int64_t server_deadline_us, const std::function<bool()>* canceled,
+               WatchResult* out) override;
     int Compaction(int keep_versions) override;
     bool IsLeader() const override;
     std::string LeaderId() const override;
@@ -54,6 +60,7 @@ private:
     std::unique_ptr<ConfigraftStateMachine> fsm_;
     std::unique_ptr<braft::Node> node_;
     std::string group_;
+    WatchHub* hub_;  // 不拥有
 };
 
 }  // namespace configraft

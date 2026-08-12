@@ -12,6 +12,8 @@
 
 namespace configraft {
 
+class WatchHub;  // watch/watch_hub.h
+
 // 写指令 apply 完成的同步等待句柄。
 //
 // 流程：RaftNode::Apply 序列化 RaftCmd 并作为 braft::Task 提交，等待端
@@ -54,9 +56,11 @@ private:
 
 // braft 复制状态机：持有 Store，on_apply 串行应用复制日志。
 // 这是"状态只在 on_apply 修改"的核心——所有节点经同一串行路径变更状态。
+// hub_（非拥有）用于在 on_apply 后广播 Watch 事件；Leader 与 Follower 都要广播，
+// 保证 Watch 可落在任意节点（每节点事件流随本地 apply 推进）。
 class ConfigraftStateMachine : public braft::StateMachine {
 public:
-    explicit ConfigraftStateMachine(Store* store) : store_(store) {}
+    ConfigraftStateMachine(Store* store, WatchHub* hub) : store_(store), hub_(hub) {}
 
     // @braft::StateMachine
     void on_apply(braft::Iterator& iter) override;
@@ -87,6 +91,7 @@ private:
     static void* save_snapshot(void* arg);
 
     Store* store_;  // 不拥有
+    WatchHub* hub_;  // 不拥有；用于 on_apply 后广播 Watch 事件
     butil::atomic<int64_t> leader_term_{-1};
 };
 

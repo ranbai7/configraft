@@ -8,6 +8,8 @@
 #include "raft/node.h"
 #include "server/config_service_impl.h"
 #include "server/kv_service_impl.h"
+#include "server/watch_service_impl.h"
+#include "watch/watch_hub.h"
 
 namespace configraft {
 
@@ -42,9 +44,13 @@ private:
     void StartCompactionLoop();
 
     ServerOptions opts_;
+    // watch_hub_ 先声明（析构逆序后销毁）：node_（Local/RaftNode）与状态机都持有
+    // hub 的非拥有指针，必须保证 hub 存活到它们全部析构之后。
+    std::unique_ptr<WatchHub> watch_hub_;
     std::unique_ptr<ConfigNode> node_;
     std::unique_ptr<KVServiceImpl> kv_svc_;
     std::unique_ptr<ConfigServiceImpl> config_svc_;
+    std::unique_ptr<WatchServiceImpl> watch_svc_;
     brpc::Server server_;
     std::thread compaction_thread_;
     std::atomic<bool> stop_compaction_{false};

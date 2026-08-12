@@ -59,6 +59,18 @@ public:
     // 读当前值。key 不存在或已被删除时返回 false，code 置 KEY_NOT_FOUND。
     bool Get(const std::string& key, KV* out, int32_t* code) const;
 
+    // ---------------- Watch（M4） ----------------
+    // 重放 (from_revision, current_revision] 开区间内 key 匹配（空=全部）的变更事件，
+    // 按 revision 升序，最多 max_events 条（超出部分留给客户端以最后事件 revision 续传）。
+    // 事件数据直接复用 MVCC 历史版本（v/ 前缀），无需额外持久化。
+    // 若 from_revision 之前的历史已被 Compaction 回收，返回 false 且 *code=COMPACTED。
+    bool ReplayEvents(int64_t from_revision, int64_t current_revision,
+                      const std::string& key, int max_events,
+                      std::vector<WatchEvent>* out, int32_t* code) const;
+    // Compaction 已回收的最大 revision（meta/compact_rev，缺失返回 0）。
+    // Watch 判定：from_revision < CompactRev() 时历史不完整，须返回 COMPACTED。
+    int64_t CompactRev() const;
+
     // ---------------- 元信息 ----------------
     // 当前已分配的最新全局 revision（仅读，从 LevelDB 读取）。
     int64_t CurrentRevision() const;

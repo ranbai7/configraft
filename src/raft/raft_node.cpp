@@ -6,10 +6,11 @@
 #include "butil/endpoint.h"
 #include "butil/iobuf.h"
 #include "common/log.h"
+#include "watch/watch_hub.h"
 
 namespace configraft {
 
-RaftNode::RaftNode() = default;
+RaftNode::RaftNode(WatchHub* hub) : hub_(hub) {}
 
 RaftNode::~RaftNode() {
     if (node_) {
@@ -25,8 +26,8 @@ bool RaftNode::Init(std::unique_ptr<Store> store, const std::string& group,
     group_ = group;
     store_ = std::move(store);
 
-    // 1. 创建状态机（持有 store）
-    fsm_ = std::make_unique<ConfigraftStateMachine>(store_.get());
+    // 1. 创建状态机（持有 store + WatchHub，on_apply 广播事件）
+    fsm_ = std::make_unique<ConfigraftStateMachine>(store_.get(), hub_);
 
     // 3. 构造监听地址（与 brpc server 同端口）
     butil::EndPoint addr;
@@ -137,6 +138,16 @@ void RaftNode::GetConfig(const std::string& key, int64_t version, ConfigResult* 
     out->code = Code::OK;
     out->kv = std::move(kv);
     store_->GetHistory(key, &out->history);
+}
+
+void RaftNode::Watch(const std::string& key, int64_t from_revision, int64_t timeout_ms,
+                     int64_t server_deadline_us, const std::function<bool()>* canceled,
+                     WatchResult* out) {
+    // Watch 不强制落在 Leader：每节点本地事件流随副本 apply 推进，以 revision 对齐。
+    // 历史重放从本节点 MVCC v/ 前缀读取（各副本一致），实时事件由本地 on_apply 广播。
+    // 注意：Follower 的 current_revision 可能滞后 Leader，客户端以其续传锚点自行推进。
+    hub_->Watch(key, from_revision, timeout_ms, server_deadline_us, canceled,
+                store_.get(), out);
 }
 
 // ---------------- 元信息 ----------------

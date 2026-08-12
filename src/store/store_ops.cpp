@@ -6,6 +6,18 @@ namespace configraft {
 
 namespace {
 
+// 把写入后的 KV 转成 Watch 事件（type 由 tombstone 决定）。
+// KV 的 revision 由 Store 写路径填充（每次写全局 +1），是事件的有序锚点。
+WatchEvent MakeEvent(const KV& kv) {
+    WatchEvent ev;
+    ev.set_key(kv.key());
+    ev.set_value(kv.value());
+    ev.set_version(kv.version());
+    ev.set_revision(kv.revision());
+    ev.set_type(kv.deleted() ? "DELETE" : "PUT");
+    return ev;
+}
+
 void ApplyPut(Store* store, const RaftCmd::PutCmd& cmd, ApplyResult* out) {
     KV kv;
     const int64_t rev = store->Put(cmd.key(), cmd.value(), &kv);
@@ -16,6 +28,7 @@ void ApplyPut(Store* store, const RaftCmd::PutCmd& cmd, ApplyResult* out) {
     }
     out->code = Code::OK;
     out->kv = std::move(kv);
+    out->events.push_back(MakeEvent(out->kv));
 }
 
 void ApplyDelete(Store* store, const RaftCmd::DeleteCmd& cmd, ApplyResult* out) {
@@ -28,6 +41,7 @@ void ApplyDelete(Store* store, const RaftCmd::DeleteCmd& cmd, ApplyResult* out) 
     }
     out->code = Code::OK;
     out->kv = std::move(kv);
+    out->events.push_back(MakeEvent(out->kv));
 }
 
 void ApplyPublish(Store* store, const RaftCmd::PublishCmd& cmd, ApplyResult* out) {
@@ -40,6 +54,7 @@ void ApplyPublish(Store* store, const RaftCmd::PublishCmd& cmd, ApplyResult* out
     }
     out->code = Code::OK;
     out->kv = std::move(kv);
+    out->events.push_back(MakeEvent(out->kv));
 }
 
 void ApplyRollback(Store* store, const RaftCmd::RollbackCmd& cmd, ApplyResult* out) {
@@ -58,6 +73,7 @@ void ApplyRollback(Store* store, const RaftCmd::RollbackCmd& cmd, ApplyResult* o
     }
     out->code = Code::OK;
     out->kv = std::move(kv);
+    out->events.push_back(MakeEvent(out->kv));
 }
 
 void ApplyBatch(Store* store, const RaftCmd::BatchPutCmd& cmd, ApplyResult* out) {
@@ -75,6 +91,10 @@ void ApplyBatch(Store* store, const RaftCmd::BatchPutCmd& cmd, ApplyResult* out)
     }
     out->code = Code::OK;
     out->kvs = std::move(new_kvs);
+    out->events.reserve(new_kvs.size());
+    for (const auto& kv : out->kvs) {
+        out->events.push_back(MakeEvent(kv));
+    }
 }
 
 }  // namespace

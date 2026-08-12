@@ -9,12 +9,14 @@ namespace storekey {
 
 namespace {
 constexpr char kRevisionMetaKey[] = "meta/revision";
+constexpr char kCompactRevKey[] = "meta/compact_rev";
 constexpr char kMainPrefix[] = "k/";
 constexpr char kVersionPrefix[] = "v/";
 constexpr char kConfigPrefix[] = "cfg/";
 }  // namespace
 
 std::string RevisionMetaKey() { return kRevisionMetaKey; }
+std::string CompactRevKey() { return kCompactRevKey; }
 
 std::string MainKey(const std::string& key) { return kMainPrefix + key; }
 

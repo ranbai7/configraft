@@ -100,12 +100,16 @@ message WatchEvent {
 message WatchResponse {
   int32  code            = 1;
   string message         = 2;
-  int64  current_revision = 3;   // 当前集群最新 revision
+  int64  current_revision = 3;   // 续传锚点（见注释：返回事件中最后一条的 revision）
   repeated WatchEvent events = 4;
 }
 
+// RESTful HTTP 统一入口（同 KVService::Rest 的设计）
+message WatchHttpRequest {}
+
 service WatchService {
   rpc Watch(WatchRequest) returns (WatchResponse);
+  rpc Rest(WatchHttpRequest) returns (WatchResponse);
 }
 
 // ---------------- 运维管理服务 ----------------

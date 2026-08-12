@@ -9,6 +9,7 @@
 #include "common/log.h"
 #include "common/storekey.h"
 #include "store/store_ops.h"
+#include "watch/watch_hub.h"
 
 namespace configraft {
 
@@ -32,6 +33,12 @@ void ConfigraftStateMachine::on_apply(braft::Iterator& iter) {
         // 串行应用到存储（所有节点执行同一逻辑）
         ApplyResult result;
         ApplyCmdToStore(store_, cmd, &result);
+
+        // 广播 Watch 事件。无论 iter.done() 是否为空（即含 Follower 复制日志）都要广播，
+        // 让每个节点都能独立服务长轮询。同步广播持锁极短，事件顺序 == 日志 apply 顺序。
+        if (hub_ && !result.events.empty()) {
+            hub_->Broadcast(result.events);
+        }
 
         // 本节点提交的请求：填充结果并唤醒等待者
         if (iter.done()) {

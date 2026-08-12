@@ -12,6 +12,7 @@ namespace storekey {
 //   cfg/{key}/{ver:16hex}  → 配置多版本索引（供 GetConfig(key, version)）
 
 std::string RevisionMetaKey();                                  // "meta/revision"
+std::string CompactRevKey();                                    // "meta/compact_rev"：Compaction 已回收的最大 revision（Watch 断点判定用）
 std::string MainKey(const std::string& key);                    // "k/" + key
 std::string VersionKey(int64_t revision, const std::string& key);  // "v/<hex>/" + key
 std::string ConfigKey(const std::string& key, int64_t version);    // "cfg/" + key + "/<hex>"

@@ -305,9 +305,11 @@ int Store::Compaction(int keep_versions) {
         per_key[key].emplace_back(storekey::DecodeOrd(rev_hex), kv.version());
     }
 
-    // 对每个 key，删除最旧的 excess 个版本对应的 v/ 与 cfg/ 记录
+    // 对每个 key，删除最旧的 excess 个版本对应的 v/ 与 cfg/ 记录；
+    // 同时记录被删 v/ 记录的最大 revision（Watch 断点续传的回收判定锚点）
     leveldb::WriteBatch batch;
     int removed = 0;
+    int64_t max_deleted_rev = 0;
     for (const auto& [key, records] : per_key) {
         const int excess = static_cast<int>(records.size()) - keep_versions;
         if (excess <= 0) {
@@ -317,10 +319,21 @@ int Store::Compaction(int keep_versions) {
             const auto& [rev, ver] = records[i];
             batch.Delete(storekey::VersionKey(rev, key));
             batch.Delete(storekey::ConfigKey(key, ver));
+            if (rev > max_deleted_rev) {
+                max_deleted_rev = rev;
+            }
             ++removed;
         }
     }
     if (removed > 0) {
+        // compact_rev = 历史累计被删的最大 revision。读改写仅在 Compaction 线程串行执行，
+        // 与所有 Delete 放同一 WriteBatch 原子提交：读者要么看到"记录已删 + compact_rev 已更新"，
+        // 要么都看不到，杜绝 Watch 误放行的中间态。
+        const int64_t new_compact_rev =
+            std::max(CompactRev(), max_deleted_rev);
+        std::string raw;
+        storekey::EncodeUint64(static_cast<uint64_t>(new_compact_rev), &raw);
+        batch.Put(storekey::CompactRevKey(), raw);
         db_->Write(leveldb::WriteOptions(), &batch);
     }
     return removed;
@@ -359,6 +372,88 @@ int64_t Store::CurrentRevision() const {
     return static_cast<int64_t>(storekey::DecodeUint64(raw));
 }
 
+// ---------------- Watch（M4） ----------------
+
+int64_t Store::CompactRev() const {
+    std::string raw;
+    const leveldb::Status s = db_->Get(
+        leveldb::ReadOptions(), storekey::CompactRevKey(), &raw);
+    if (!s.ok()) {
+        return 0;
+    }
+    return static_cast<int64_t>(storekey::DecodeUint64(raw));
+}
+
+bool Store::ReplayEvents(int64_t from_revision, int64_t current_revision,
+                         const std::string& key, int max_events,
+                         std::vector<WatchEvent>* out, int32_t* code) const {
+    if (code) {
+        *code = Code::OK;
+    }
+    if (out) {
+        out->clear();
+    }
+    if (max_events <= 0) {
+        return true;
+    }
+    if (from_revision < 0) {
+        from_revision = 0;
+    }
+
+    // 顺序不变量：先建立一致迭代器快照（钉住 LevelDB 版本集），再读 compact_rev。
+    // 与 Compaction 的原子写入（删除 + compact_rev 同一 WriteBatch）配合：
+    //   - Compaction 先提交：迭代器看不到被删记录，但 Get 已见新 compact_rev → 报 COMPACTED；
+    //   - Compaction 后提交：迭代器快照仍含记录，Get 可能见新 compact_rev → 保守误报 COMPACTED。
+    // 二者都杜绝"读到不完整重放却未报 COMPACTED"。
+    leveldb::ReadOptions ro;
+    std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(ro));
+    const int64_t compact_rev = CompactRev();
+
+    // compact_rev = 被删 v/ 记录的最大 revision，故 (from, current] 内无洞 ⟺ from >= compact_rev。
+    if (from_revision < compact_rev) {
+        if (code) {
+            *code = Code::COMPACTED;
+        }
+        return false;
+    }
+    if (from_revision >= current_revision) {
+        return true;  // 开区间为空，无事件可重放
+    }
+
+    // Seek 到 (from_revision+1) 的第一个 v/ 记录（v/ 按 revision 字典序 == 数值序升序）
+    for (it->Seek(storekey::VersionKey(from_revision + 1, ""));
+         it->Valid() && it->key().starts_with("v/"); it->Next()) {
+        const leveldb::Slice k = it->key();
+        if (k.size() < 18) {  // "v/" + 16 hex + "/" 之后的 key 至少占 1 位
+            continue;
+        }
+        const int64_t rev = storekey::DecodeOrd(k.ToString().substr(2, 16));
+        if (rev > current_revision) {
+            break;
+        }
+        KV kv;
+        if (!kv.ParseFromString(it->value().ToString())) {
+            continue;
+        }
+        if (!key.empty() && kv.key() != key) {
+            continue;
+        }
+        WatchEvent ev;
+        ev.set_revision(rev);
+        ev.set_key(kv.key());
+        ev.set_value(kv.value());
+        ev.set_version(kv.version());
+        ev.set_type(kv.deleted() ? "DELETE" : "PUT");
+        if (out) {
+            out->push_back(std::move(ev));
+        }
+        if (out && static_cast<int>(out->size()) >= max_events) {
+            break;
+        }
+    }
+    return true;
+}
+
 bool Store::LoadSnapshot(const SnapshotData& data, std::string* err) {
     // 1. 关闭现有 DB
     db_.reset();
@@ -381,6 +476,11 @@ bool Store::LoadSnapshot(const SnapshotData& data, std::string* err) {
         std::string raw;
         storekey::EncodeUint64(static_cast<uint64_t>(data.revision()), &raw);
         batch.Put(storekey::RevisionMetaKey(), raw);
+        // 快照只保留主索引（历史由后续日志重建），故 compact_rev 重置为快照 revision：
+        // 任何 from_revision < snapshot.revision() 的续传都是不完整的（历史已丢弃），须报 COMPACTED。
+        std::string compact_raw;
+        storekey::EncodeUint64(static_cast<uint64_t>(data.revision()), &compact_raw);
+        batch.Put(storekey::CompactRevKey(), compact_raw);
     }
     const leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
     if (!s.ok()) {

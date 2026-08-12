@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,10 @@ struct ApplyResult {
     KV kv;                    // 受影响 key 的最新 KV
     std::vector<KV> kvs;      // 批量操作结果
     std::string leader_id;    // NOT_LEADER 时的重定向目标
+    // Watch 事件（M4）：本次写成功产生的变更事件，由调用方（on_apply / LocalNode::Apply）
+    // 交给 WatchHub 广播。仅在写成功（code==OK）时填充；与 iter.done() 无关——
+    // 复制到 Follower 的日志同样要广播，保证 Watch 可落在任意节点。
+    std::vector<WatchEvent> events;
 };
 
 struct GetResult {
@@ -33,6 +38,16 @@ struct ConfigResult {
     std::vector<KV> history;  // 历史版本
 };
 
+// Watch 长轮询结果（M4）。current_revision 是客户端续传锚点：
+// 有事件时为最后一条事件的 revision，无事件时为当前集群 revision。客户端下一轮
+// from_revision 取此值即可保证不丢、不重。
+struct WatchResult {
+    int32_t code = Code::OK;          // OK / COMPACTED / INTERNAL(overflow)
+    std::string message;
+    int64_t current_revision = 0;
+    std::vector<WatchEvent> events;   // 升序（按 revision）
+};
+
 // 节点抽象。
 //   - 单机模式（M1）：LocalNode 同步执行；
 //   - 集群模式（M2+）：RaftNode 经 braft 提交复制日志，同步等待 apply 完成。
@@ -47,6 +62,15 @@ public:
     // ---- 读路径 ----
     virtual void Get(const std::string& key, bool serializable, GetResult* out) = 0;
     virtual void GetConfig(const std::string& key, int64_t version, ConfigResult* out) = 0;
+
+    // ---- Watch 长轮询（M4） ----
+    // 阻塞式长轮询：重放 (from_revision, now] 历史事件并等待新事件，直到有事件 /
+    // 超时 / server 取消 / overflow。不要求必须落在 Leader（每节点本地事件流随副本
+    // apply 推进，以 revision 对齐）。server_deadline_us<=0 表示无服务器侧截止。
+    // canceled 非空时在等待循环中轮询（客户端断开/服务器关闭连接时提前退出）。
+    virtual void Watch(const std::string& key, int64_t from_revision, int64_t timeout_ms,
+                       int64_t server_deadline_us, const std::function<bool()>* canceled,
+                       WatchResult* out) = 0;
 
     // ---- 维护 ----
     // 回收过期 MVCC 历史版本（每 key 保留最近 keep_versions 个）。返回删除条数。

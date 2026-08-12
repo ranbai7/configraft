@@ -21,6 +21,8 @@ constexpr char kKVServiceRestMappings[] =
     "/v1/kv/* => Rest,";
 constexpr char kConfigServiceRestMappings[] =
     "/v1/config/* => Rest,";
+constexpr char kWatchServiceRestMappings[] =
+    "/v1/watch/* => Rest,";
 
 // MVCC 版本回收策略：每 key 保留的最近版本数
 constexpr int kKeepVersions = 10;
@@ -44,11 +46,12 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
     }
     LOG(INFO) << "store opened at " << store_dir;
 
-    // 2. 创建节点
+    // 2. 创建事件分发中枢（Watch 长轮询用），再创建节点
     //    - 集群模式（RaftNode）：Raft RPC 需在 server.Start 前注册（共享端口）
     //    - 单机模式（LocalNode）：同步执行
+    watch_hub_ = std::make_unique<WatchHub>();
     if (cluster) {
-        auto raft_node = std::make_unique<RaftNode>();
+        auto raft_node = std::make_unique<RaftNode>(watch_hub_.get());
         if (!raft_node->AddServiceToServer(&server_, opts_.port)) {
             if (err) {
                 *err = "fail to add raft service";
@@ -57,7 +60,7 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
         }
         node_ = std::move(raft_node);
     } else {
-        node_ = std::make_unique<LocalNode>(std::move(store));
+        node_ = std::make_unique<LocalNode>(std::move(store), watch_hub_.get());
     }
 
     // 3. 创建服务并注册到 brpc Server（单端口：gRPC + HTTP + Raft 内部通信 + 监控面板）
@@ -74,6 +77,14 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
                            kConfigServiceRestMappings) != 0) {
         if (err) {
             *err = "fail to add ConfigService";
+        }
+        return false;
+    }
+    watch_svc_ = std::make_unique<WatchServiceImpl>(node_.get());
+    if (server_.AddService(watch_svc_.get(), brpc::SERVER_DOESNT_OWN_SERVICE,
+                           kWatchServiceRestMappings) != 0) {
+        if (err) {
+            *err = "fail to add WatchService";
         }
         return false;
     }

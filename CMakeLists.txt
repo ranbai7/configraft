@@ -54,6 +54,7 @@ file(GLOB_RECURSE CORE_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/src/store/*.cpp"
     "${CMAKE_SOURCE_DIR}/src/raft/*.cpp"
     "${CMAKE_SOURCE_DIR}/src/server/*.cpp"
+    "${CMAKE_SOURCE_DIR}/src/watch/*.cpp"
 )
 
 add_library(configraft_core STATIC ${CORE_SOURCES} ${PROTO_SRCS} ${PROTO_HDRS})
