@@ -26,13 +26,23 @@ void LocalNode::Get(const std::string& key, bool serializable, GetResult* out) {
 }
 
 void LocalNode::GetConfig(const std::string& key, int64_t version, ConfigResult* out) {
-    // M3 实现配置多版本查询
-    (void)key;
-    (void)version;
-    out->code = Code::INTERNAL;
-    out->message = "GetConfig not implemented yet";
+    KV kv;
+    int32_t code = 0;
+    if (!store_->GetConfig(key, version, &kv, &code)) {
+        out->code = code;
+        out->message = (code == Code::VERSION_NOT_FOUND) ? "version not found"
+                                                         : "key not found";
+        return;
+    }
+    out->code = Code::OK;
+    out->kv = std::move(kv);
+    store_->GetHistory(key, &out->history);
 }
 
 int64_t LocalNode::CurrentRevision() const { return store_->CurrentRevision(); }
+
+int LocalNode::Compaction(int keep_versions) {
+    return store_->Compaction(keep_versions);
+}
 
 }  // namespace configraft

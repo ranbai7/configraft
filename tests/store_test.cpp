@@ -100,3 +100,86 @@ TEST_F(StoreTest, BatchPut) {
     EXPECT_EQ(got.value(), "3");
     EXPECT_EQ(got.version(), 1);
 }
+
+// ---------------- M3：MVCC 版本模型 ----------------
+
+TEST_F(StoreTest, PublishAndGetConfigVersion) {
+    KV kv;
+    store_.Publish("cfg", "1000", &kv);
+    store_.Publish("cfg", "2000", &kv);
+    store_.Publish("cfg", "3000", &kv);
+    EXPECT_EQ(kv.version(), 3);
+
+    KV v1;
+    int32_t code = 0;
+    ASSERT_TRUE(store_.GetConfig("cfg", 1, &v1, &code));
+    EXPECT_EQ(v1.value(), "1000");
+    EXPECT_EQ(code, Code::OK);
+
+    // 历史应含 3 个版本
+    std::vector<KV> history;
+    store_.GetHistory("cfg", &history);
+    EXPECT_EQ(history.size(), 3u);
+
+    // 不存在的版本
+    code = 0;
+    ASSERT_FALSE(store_.GetConfig("cfg", 99, &v1, &code));
+    EXPECT_EQ(code, Code::VERSION_NOT_FOUND);
+}
+
+TEST_F(StoreTest, RollbackCreatesNewVersion) {
+    store_.Publish("cfg", "1000", nullptr);
+    store_.Publish("cfg", "2000", nullptr);
+
+    KV kv;
+    bool ok = false;
+    const int64_t rev = store_.Rollback("cfg", 1, &kv, &ok);
+    ASSERT_TRUE(ok);
+    EXPECT_GT(rev, 0);
+    EXPECT_EQ(kv.value(), "1000");  // 回滚到 v1 的值
+    EXPECT_EQ(kv.version(), 3);     // 回滚产生新版本 v3（不删历史）
+
+    std::vector<KV> history;
+    store_.GetHistory("cfg", &history);
+    EXPECT_EQ(history.size(), 3u);
+
+    // 回滚到不存在的版本
+    ok = true;
+    store_.Rollback("cfg", 99, &kv, &ok);
+    EXPECT_FALSE(ok);
+}
+
+TEST_F(StoreTest, CompactionKeepsLatestVersions) {
+    for (int i = 1; i <= 15; ++i) {
+        store_.Publish("cfg", std::to_string(i), nullptr);
+    }
+
+    // 当前值 v15
+    KV cur;
+    int32_t code = 0;
+    ASSERT_TRUE(store_.GetConfig("cfg", 0, &cur, &code));
+    EXPECT_EQ(cur.value(), "15");
+
+    // Compaction 保留最近 5 个版本
+    const int removed = store_.Compaction(5);
+    EXPECT_GT(removed, 0);
+
+    // 最新值不受影响
+    ASSERT_TRUE(store_.GetConfig("cfg", 0, &cur, &code));
+    EXPECT_EQ(cur.value(), "15");
+
+    // 老版本 v1 已被回收
+    KV old;
+    code = 0;
+    ASSERT_FALSE(store_.GetConfig("cfg", 1, &old, &code));
+    EXPECT_EQ(code, Code::VERSION_NOT_FOUND);
+
+    // 保留的 v11 仍可读
+    ASSERT_TRUE(store_.GetConfig("cfg", 11, &old, &code));
+    EXPECT_EQ(old.value(), "11");
+
+    // 历史只含最近 5 个
+    std::vector<KV> history;
+    store_.GetHistory("cfg", &history);
+    EXPECT_EQ(history.size(), 5u);
+}

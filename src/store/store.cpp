@@ -1,6 +1,7 @@
 #include "store/store.h"
 
 #include <filesystem>
+#include <map>
 #include <utility>
 
 #include "common/storekey.h"
@@ -177,6 +178,152 @@ int64_t Store::BatchPut(
         *out_kvs = std::move(new_kvs);
     }
     return 0;  // 批量成功，revision 由各条记录携带
+}
+
+int64_t Store::Publish(const std::string& key, const std::string& value, KV* out_kv) {
+    KV old_kv;
+    const bool existed = ReadMain(key, &old_kv);
+
+    const int64_t rev = NextRevision();
+    if (rev < 0) {
+        return -1;
+    }
+
+    KV new_kv;
+    new_kv.set_key(key);
+    new_kv.set_value(value);
+    new_kv.set_version(existed ? old_kv.version() + 1 : 1);
+    new_kv.set_revision(rev);
+    new_kv.set_deleted(false);
+
+    std::string serialized;
+    SerializeKV(new_kv, &serialized);
+
+    leveldb::WriteBatch batch;
+    batch.Put(storekey::MainKey(key), serialized);
+    batch.Put(storekey::VersionKey(rev, key), serialized);
+    batch.Put(storekey::ConfigKey(key, new_kv.version()), serialized);
+    const leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
+    if (!s.ok()) {
+        return -1;
+    }
+    if (out_kv) {
+        *out_kv = std::move(new_kv);
+    }
+    return rev;
+}
+
+int64_t Store::Rollback(const std::string& key, int64_t target_version, KV* out_kv,
+                        bool* ok) {
+    if (ok) {
+        *ok = false;
+    }
+    KV target;
+    int32_t code = 0;
+    if (!GetConfig(key, target_version, &target, &code)) {
+        return -1;
+    }
+    if (ok) {
+        *ok = true;
+    }
+    // 回滚不删历史：把目标版本的值作为新版本发布（对齐 etcd 语义）
+    return Publish(key, target.value(), out_kv);
+}
+
+bool Store::GetConfig(const std::string& key, int64_t version, KV* out,
+                      int32_t* code) const {
+    if (version <= 0) {
+        return Get(key, out, code);
+    }
+    std::string raw;
+    const leveldb::Status s =
+        db_->Get(leveldb::ReadOptions(), storekey::ConfigKey(key, version), &raw);
+    if (s.IsNotFound()) {
+        if (code) {
+            *code = Code::VERSION_NOT_FOUND;
+        }
+        return false;
+    }
+    if (!s.ok()) {
+        if (code) {
+            *code = Code::INTERNAL;
+        }
+        return false;
+    }
+    if (!out->ParseFromString(raw)) {
+        if (code) {
+            *code = Code::INTERNAL;
+        }
+        return false;
+    }
+    if (out->deleted()) {
+        if (code) {
+            *code = Code::VERSION_NOT_FOUND;
+        }
+        return false;
+    }
+    if (code) {
+        *code = Code::OK;
+    }
+    return true;
+}
+
+void Store::GetHistory(const std::string& key, std::vector<KV>* out) const {
+    const std::string prefix = "cfg/" + key + "/";
+    leveldb::ReadOptions ro;
+    std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(ro));
+    for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
+        KV kv;
+        if (kv.ParseFromString(it->value().ToString()) && !kv.deleted()) {
+            out->push_back(std::move(kv));
+        }
+    }
+}
+
+int Store::Compaction(int keep_versions) {
+    if (keep_versions < 1) {
+        keep_versions = 1;
+    }
+    // 遍历 v/ 前缀，按 key 收集所有 (revision, version)，revision 升序
+    std::map<std::string, std::vector<std::pair<int64_t, int64_t>>> per_key;
+    leveldb::ReadOptions ro;
+    std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(ro));
+    const std::string v_prefix = "v/";
+    for (it->Seek(v_prefix); it->Valid() && it->key().starts_with(v_prefix);
+         it->Next()) {
+        // key 格式: v/{rev:16hex}/{key}
+        const leveldb::Slice k = it->key();
+        if (k.size() < 18) {
+            continue;
+        }
+        const std::string rev_hex = k.ToString().substr(2, 16);
+        const std::string key = k.ToString().substr(2 + 16 + 1);
+        KV kv;
+        if (!kv.ParseFromString(it->value().ToString())) {
+            continue;
+        }
+        per_key[key].emplace_back(storekey::DecodeOrd(rev_hex), kv.version());
+    }
+
+    // 对每个 key，删除最旧的 excess 个版本对应的 v/ 与 cfg/ 记录
+    leveldb::WriteBatch batch;
+    int removed = 0;
+    for (const auto& [key, records] : per_key) {
+        const int excess = static_cast<int>(records.size()) - keep_versions;
+        if (excess <= 0) {
+            continue;
+        }
+        for (int i = 0; i < excess; ++i) {
+            const auto& [rev, ver] = records[i];
+            batch.Delete(storekey::VersionKey(rev, key));
+            batch.Delete(storekey::ConfigKey(key, ver));
+            ++removed;
+        }
+    }
+    if (removed > 0) {
+        db_->Write(leveldb::WriteOptions(), &batch);
+    }
+    return removed;
 }
 
 bool Store::Get(const std::string& key, KV* out, int32_t* code) const {

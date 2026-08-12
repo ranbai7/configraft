@@ -1,9 +1,12 @@
 #pragma once
+#include <atomic>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "brpc/server.h"
 #include "raft/node.h"
+#include "server/config_service_impl.h"
 #include "server/kv_service_impl.h"
 
 namespace configraft {
@@ -24,7 +27,7 @@ struct ServerOptions {
 class ConfigraftServer {
 public:
     ConfigraftServer() = default;
-    ~ConfigraftServer() = default;
+    ~ConfigraftServer();
 
     // 初始化节点与各 service，并绑定端口（不阻塞）。
     bool Init(const ServerOptions& opts, std::string* err);
@@ -35,10 +38,16 @@ public:
     const ServerOptions& options() const { return opts_; }
 
 private:
+    // 后台 Compaction 循环：定时回收过期 MVCC 历史版本
+    void StartCompactionLoop();
+
     ServerOptions opts_;
     std::unique_ptr<ConfigNode> node_;
     std::unique_ptr<KVServiceImpl> kv_svc_;
+    std::unique_ptr<ConfigServiceImpl> config_svc_;
     brpc::Server server_;
+    std::thread compaction_thread_;
+    std::atomic<bool> stop_compaction_{false};
 };
 
 }  // namespace configraft

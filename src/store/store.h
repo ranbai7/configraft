@@ -39,6 +39,22 @@ public:
     int64_t BatchPut(const std::vector<std::pair<std::string, std::string>>& kvs,
                      std::vector<KV>* out_kvs);
 
+    // ---------------- 配置语义（M3） ----------------
+    // 发布配置：同 Put 但额外写 cfg/{key}/{version} 索引（供按版本查询）。
+    int64_t Publish(const std::string& key, const std::string& value, KV* out_kv);
+    // 回滚到指定版本：读目标版本的值，作为新版本写回（不删历史，etcd 语义）。
+    // 目标版本不存在时 ok=false。
+    int64_t Rollback(const std::string& key, int64_t target_version, KV* out_kv, bool* ok);
+    // 读指定版本配置。version<=0 表示最新（主索引）；>0 读 cfg 索引。
+    // 不存在时返回 false，code 置 VERSION_NOT_FOUND。
+    bool GetConfig(const std::string& key, int64_t version, KV* out, int32_t* code) const;
+    // 返回该 key 的全部历史版本（按 version 升序，供 ConfigResponse.history）。
+    void GetHistory(const std::string& key, std::vector<KV>* out) const;
+    // 回收过期历史版本：每 key 仅保留最近 keep_versions 个版本，
+    // 删除更早的 v/ 记录与对应 cfg/ 记录（tombstone 一并回收）。
+    // 返回删除的记录条数。
+    int Compaction(int keep_versions);
+
     // ---------------- 读路径（并发） ----------------
     // 读当前值。key 不存在或已被删除时返回 false，code 置 KEY_NOT_FOUND。
     bool Get(const std::string& key, KV* out, int32_t* code) const;

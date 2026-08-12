@@ -1,5 +1,6 @@
 #include "server/server.h"
 
+#include <chrono>
 #include <memory>
 #include <utility>
 
@@ -18,6 +19,12 @@ namespace {
 // 未出现在映射中的 gRPC 方法仍通过 /configraft.v1.KVService/Put 等访问。
 constexpr char kKVServiceRestMappings[] =
     "/v1/kv/* => Rest,";
+constexpr char kConfigServiceRestMappings[] =
+    "/v1/config/* => Rest,";
+
+// MVCC 版本回收策略：每 key 保留的最近版本数
+constexpr int kKeepVersions = 10;
+constexpr int kCompactionIntervalSeconds = 60;
 
 }  // namespace
 
@@ -62,6 +69,14 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
         }
         return false;
     }
+    config_svc_ = std::make_unique<ConfigServiceImpl>(node_.get());
+    if (server_.AddService(config_svc_.get(), brpc::SERVER_DOESNT_OWN_SERVICE,
+                           kConfigServiceRestMappings) != 0) {
+        if (err) {
+            *err = "fail to add ConfigService";
+        }
+        return false;
+    }
 
     brpc::ServerOptions brpc_opts;
     brpc_opts.num_threads = 4;
@@ -85,9 +100,32 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
     LOG(INFO) << "Configraft server listening on " << opts_.listen_ip << ":"
               << opts_.port << " (mode=" << (cluster ? "cluster" : "single")
               << ", gRPC / HTTP / raft / status)";
+
+    // 5. 启动后台 Compaction 循环（回收过期 MVCC 历史版本）
+    StartCompactionLoop();
     return true;
 }
 
+ConfigraftServer::~ConfigraftServer() {
+    stop_compaction_ = true;
+    if (compaction_thread_.joinable()) {
+        compaction_thread_.join();
+    }
+}
+
 void ConfigraftServer::RunUntilAskedToQuit() { server_.RunUntilAskedToQuit(); }
+
+void ConfigraftServer::StartCompactionLoop() {
+    compaction_thread_ = std::thread([this] {
+        while (!stop_compaction_.load()) {
+            std::this_thread::sleep_for(
+                std::chrono::seconds(kCompactionIntervalSeconds));
+            const int removed = node_->Compaction(kKeepVersions);
+            if (removed > 0) {
+                LOG(INFO) << "compaction removed " << removed << " stale versions";
+            }
+        }
+    });
+}
 
 }  // namespace configraft

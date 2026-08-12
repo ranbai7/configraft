@@ -30,6 +30,36 @@ void ApplyDelete(Store* store, const RaftCmd::DeleteCmd& cmd, ApplyResult* out) 
     out->kv = std::move(kv);
 }
 
+void ApplyPublish(Store* store, const RaftCmd::PublishCmd& cmd, ApplyResult* out) {
+    KV kv;
+    const int64_t rev = store->Publish(cmd.key(), cmd.value(), &kv);
+    if (rev < 0) {
+        out->code = Code::INTERNAL;
+        out->message = "store publish failed";
+        return;
+    }
+    out->code = Code::OK;
+    out->kv = std::move(kv);
+}
+
+void ApplyRollback(Store* store, const RaftCmd::RollbackCmd& cmd, ApplyResult* out) {
+    bool ok = false;
+    KV kv;
+    const int64_t rev = store->Rollback(cmd.key(), cmd.target_version(), &kv, &ok);
+    if (!ok) {
+        out->code = Code::VERSION_NOT_FOUND;
+        out->message = "target version not found";
+        return;
+    }
+    if (rev < 0) {
+        out->code = Code::INTERNAL;
+        out->message = "store rollback failed";
+        return;
+    }
+    out->code = Code::OK;
+    out->kv = std::move(kv);
+}
+
 void ApplyBatch(Store* store, const RaftCmd::BatchPutCmd& cmd, ApplyResult* out) {
     std::vector<std::pair<std::string, std::string>> kvs;
     kvs.reserve(cmd.puts_size());
@@ -66,14 +96,10 @@ void ApplyCmdToStore(Store* store, const RaftCmd& cmd, ApplyResult* out) {
             out->message = "CAS not implemented yet";
             break;
         case RaftCmd::CmdCase::kPublish:
-            // M3 实现配置发布
-            out->code = Code::INTERNAL;
-            out->message = "Publish not implemented yet";
+            ApplyPublish(store, cmd.publish(), out);
             break;
         case RaftCmd::CmdCase::kRollback:
-            // M3 实现配置回滚
-            out->code = Code::INTERNAL;
-            out->message = "Rollback not implemented yet";
+            ApplyRollback(store, cmd.rollback(), out);
             break;
         default:
             out->code = Code::INTERNAL;

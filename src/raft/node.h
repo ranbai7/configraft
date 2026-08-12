@@ -48,6 +48,10 @@ public:
     virtual void Get(const std::string& key, bool serializable, GetResult* out) = 0;
     virtual void GetConfig(const std::string& key, int64_t version, ConfigResult* out) = 0;
 
+    // ---- 维护 ----
+    // 回收过期 MVCC 历史版本（每 key 保留最近 keep_versions 个）。返回删除条数。
+    virtual int Compaction(int keep_versions) = 0;
+
     // ---- 元信息（Admin / 监控） ----
     virtual bool IsLeader() const = 0;
     virtual std::string LeaderId() const = 0;

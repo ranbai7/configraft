@@ -39,6 +39,7 @@ public:
     void Apply(const RaftCmd& cmd, ApplyResult* out) override;
     void Get(const std::string& key, bool serializable, GetResult* out) override;
     void GetConfig(const std::string& key, int64_t version, ConfigResult* out) override;
+    int Compaction(int keep_versions) override;
     bool IsLeader() const override;
     std::string LeaderId() const override;
     std::string Role() const override;

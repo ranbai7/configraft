@@ -72,10 +72,14 @@ message ConfigResponse {
   repeated KV history = 4;     // GetConfig 可返回该 key 的全部历史版本
 }
 
+// RESTful HTTP 统一入口（同 KVService::Rest 的设计）
+message ConfigHttpRequest {}
+
 service ConfigService {
   rpc Publish(PublishRequest) returns (ConfigResponse);
   rpc GetConfig(GetConfigRequest) returns (ConfigResponse);
   rpc Rollback(RollbackRequest) returns (ConfigResponse);
+  rpc Rest(ConfigHttpRequest) returns (ConfigResponse);
 }
 
 // ---------------- Watch 服务（HTTP 长轮询，见概述决策 #2） ----------------

@@ -125,11 +125,18 @@ void RaftNode::Get(const std::string& key, bool serializable, GetResult* out) {
 }
 
 void RaftNode::GetConfig(const std::string& key, int64_t version, ConfigResult* out) {
-    // M3 实现配置多版本查询
-    (void)key;
-    (void)version;
-    out->code = Code::INTERNAL;
-    out->message = "GetConfig not implemented yet";
+    // 配置读取走本地状态机（写路径已保证各节点一致；M5 起对线性一致读引入 ReadIndex）
+    KV kv;
+    int32_t code = 0;
+    if (!store_->GetConfig(key, version, &kv, &code)) {
+        out->code = code;
+        out->message = (code == Code::VERSION_NOT_FOUND) ? "version not found"
+                                                         : "key not found";
+        return;
+    }
+    out->code = Code::OK;
+    out->kv = std::move(kv);
+    store_->GetHistory(key, &out->history);
 }
 
 // ---------------- 元信息 ----------------
@@ -204,5 +211,9 @@ std::vector<std::string> RaftNode::Peers() const {
 }
 
 int64_t RaftNode::CurrentRevision() const { return store_->CurrentRevision(); }
+
+int RaftNode::Compaction(int keep_versions) {
+    return store_->Compaction(keep_versions);
+}
 
 }  // namespace configraft
