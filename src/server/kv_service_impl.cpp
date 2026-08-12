@@ -24,6 +24,9 @@ void KVServiceImpl::DoGet(const std::string& key, bool serializable, KVResponse*
     node_->Get(key, serializable, &result);
     resp->set_code(result.code);
     resp->set_message(result.message);
+    if (result.code == Code::NOT_LEADER && !result.leader_id.empty()) {
+        resp->set_message("not leader, leader=" + result.leader_id);
+    }
     if (result.code == Code::OK) {
         resp->mutable_kv()->CopyFrom(result.kv);
     }

@@ -47,6 +47,11 @@ public:
     // 当前已分配的最新全局 revision（仅读，从 LevelDB 读取）。
     int64_t CurrentRevision() const;
 
+    // ---------------- 快照 ----------------
+    // 用快照数据重建整个 DB（braft on_snapshot_load 使用）：关闭现有 DB、
+    // 重建目录、批量写入快照的主索引与 revision。data 为空则清空。
+    bool LoadSnapshot(const SnapshotData& data, std::string* err);
+
     leveldb::DB* db() const { return db_.get(); }
 
 private:
@@ -58,6 +63,7 @@ private:
     static void SerializeKV(const KV& kv, std::string* out);
 
     std::unique_ptr<leveldb::DB> db_;
+    std::string data_dir_;  // LevelDB 目录（快照重建时使用）
 };
 
 }  // namespace configraft

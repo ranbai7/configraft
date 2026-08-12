@@ -23,6 +23,7 @@ struct GetResult {
     std::string message;
     KV kv;
     std::vector<KV> kvs;
+    std::string leader_id;  // NOT_LEADER 时的重定向目标
 };
 
 struct ConfigResult {

@@ -11,6 +11,7 @@ namespace configraft {
 // 启动参数（由 server_main.cpp 从 gflags 解析）
 struct ServerOptions {
     int port = 8000;
+    std::string listen_ip = "127.0.0.1";
     std::string data_dir = "data";
     // 集群模式（M2 起）
     std::string node_name;  // 为空 → 单机模式（LocalNode）

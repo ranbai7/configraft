@@ -5,6 +5,7 @@
 
 #include "common/log.h"
 #include "raft/local_node.h"
+#include "raft/raft_node.h"
 #include "store/store.h"
 
 namespace configraft {
@@ -22,31 +23,38 @@ constexpr char kKVServiceRestMappings[] =
 
 bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
     opts_ = opts;
+    const bool cluster = !opts_.node_name.empty();
+    const std::string store_dir = opts_.data_dir + "/data";
 
-    // 1. 打开存储
+    // 1. 打开存储（LevelDB 目录：data_dir/data；集群下 Raft 元数据于 data_dir/raft）
     auto store = std::make_unique<Store>();
     std::string store_err;
-    if (!store->Open(opts_.data_dir, &store_err)) {
+    if (!store->Open(store_dir, &store_err)) {
         if (err) {
-            *err = "open store " + opts_.data_dir + " failed: " + store_err;
+            *err = "open store " + store_dir + " failed: " + store_err;
         }
         return false;
     }
-    LOG(INFO) << "store opened at " << opts_.data_dir;
+    LOG(INFO) << "store opened at " << store_dir;
 
-    // 2. 创建节点（集群模式 M2 起接入 braft；目前单机同步执行）
-    if (!opts_.node_name.empty()) {
-        if (err) {
-            *err = "cluster mode not implemented yet (M2)";
+    // 2. 创建节点
+    //    - 集群模式（RaftNode）：Raft RPC 需在 server.Start 前注册（共享端口）
+    //    - 单机模式（LocalNode）：同步执行
+    if (cluster) {
+        auto raft_node = std::make_unique<RaftNode>();
+        if (!raft_node->AddServiceToServer(&server_, opts_.port)) {
+            if (err) {
+                *err = "fail to add raft service";
+            }
+            return false;
         }
-        return false;
+        node_ = std::move(raft_node);
+    } else {
+        node_ = std::make_unique<LocalNode>(std::move(store));
     }
-    node_ = std::make_unique<LocalNode>(std::move(store));
 
-    // 3. 创建服务
+    // 3. 创建服务并注册到 brpc Server（单端口：gRPC + HTTP + Raft 内部通信 + 监控面板）
     kv_svc_ = std::make_unique<KVServiceImpl>(node_.get());
-
-    // 4. 注册到 brpc Server（单端口：gRPC + HTTP + Raft 内部通信 + 监控面板）
     if (server_.AddService(kv_svc_.get(), brpc::SERVER_DOESNT_OWN_SERVICE,
                            kKVServiceRestMappings) != 0) {
         if (err) {
@@ -63,8 +71,20 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
         }
         return false;
     }
-    LOG(INFO) << "Configraft server listening on 0.0.0.0:" << opts_.port
-              << " (gRPC / HTTP / raft / status)";
+
+    // 4. 集群模式：server 就绪后再启动 Raft 节点（避免成为 Leader 时服务不可达）
+    if (cluster) {
+        auto* raft_node = static_cast<RaftNode*>(node_.get());
+        if (!raft_node->Init(std::move(store), "configraft", opts_.listen_ip,
+                             opts_.port, opts_.peers, opts_.data_dir,
+                             opts_.election_timeout_ms, err)) {
+            return false;
+        }
+    }
+
+    LOG(INFO) << "Configraft server listening on " << opts_.listen_ip << ":"
+              << opts_.port << " (mode=" << (cluster ? "cluster" : "single")
+              << ", gRPC / HTTP / raft / status)";
     return true;
 }
 

@@ -1,5 +1,6 @@
 #include "store/store.h"
 
+#include <filesystem>
 #include <utility>
 
 #include "common/storekey.h"
@@ -10,6 +11,7 @@ namespace configraft {
 Store::~Store() { Close(); }
 
 bool Store::Open(const std::string& data_dir, std::string* err) {
+    std::filesystem::create_directories(data_dir);
     leveldb::Options opts;
     opts.create_if_missing = true;
     leveldb::DB* db = nullptr;
@@ -21,6 +23,7 @@ bool Store::Open(const std::string& data_dir, std::string* err) {
         return false;
     }
     db_.reset(db);
+    data_dir_ = data_dir;
     return true;
 }
 
@@ -207,6 +210,39 @@ int64_t Store::CurrentRevision() const {
         return 0;
     }
     return static_cast<int64_t>(storekey::DecodeUint64(raw));
+}
+
+bool Store::LoadSnapshot(const SnapshotData& data, std::string* err) {
+    // 1. 关闭现有 DB
+    db_.reset();
+    // 2. 删除并重建目录（LevelDB 不允许直接在旧目录上重开）
+    std::error_code ec;
+    std::filesystem::remove_all(data_dir_, ec);
+    // 3. 重新打开
+    if (!Open(data_dir_, err)) {
+        return false;
+    }
+    // 4. 批量写入快照的主索引与历史版本
+    leveldb::WriteBatch batch;
+    for (const auto& kv : data.kvs()) {
+        std::string serialized;
+        kv.SerializeToString(&serialized);
+        batch.Put(storekey::MainKey(kv.key()), serialized);
+        batch.Put(storekey::VersionKey(kv.revision(), kv.key()), serialized);
+    }
+    if (data.revision() > 0) {
+        std::string raw;
+        storekey::EncodeUint64(static_cast<uint64_t>(data.revision()), &raw);
+        batch.Put(storekey::RevisionMetaKey(), raw);
+    }
+    const leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
+    if (!s.ok()) {
+        if (err) {
+            *err = "write snapshot failed: " + s.ToString();
+        }
+        return false;
+    }
+    return true;
 }
 
 }  // namespace configraft
