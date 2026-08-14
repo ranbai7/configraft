@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <utility>
 
+#include "bthread/bthread.h"
 #include "butil/time.h"
 #include "raft/node.h"
 #include "store/store.h"
@@ -109,6 +110,30 @@ bool WatchHub::Watch(const std::string& key, int64_t from_revision, int64_t time
         out->message = "requested revision has been compacted, resume from current_revision";
         out->current_revision = store->CurrentRevision();
         return false;
+    }
+
+    // 1.5) 节点落后于客户端续传锚点（重启/快照追赶中）：先等本节点追平，避免追赶
+    //      期间本地重新 apply 旧日志、广播出客户端已消费的旧事件（M7 混沌测试发现：
+    //      from=N 连上落后节点会收到 revision<=N 的重复事件，破坏"不丢不重"）。
+    //      追赶通常毫秒级（日志/快照复制）；5s 未追平（如大快照加载）返回 INTERNAL，
+    //      客户端保留锚点重试——**绝不返回低于 from_revision 的 current_revision**。
+    if (from_revision > 0) {
+        int64_t catchup_deadline_us = butil::gettimeofday_us() + 5000000;
+        if (server_deadline_us > 0 && server_deadline_us < catchup_deadline_us) {
+            catchup_deadline_us = server_deadline_us;
+        }
+        while (store->CurrentRevision() < from_revision) {
+            if (canceled && (*canceled)()) {
+                return true;  // 客户端断开：返回空结果
+            }
+            if (butil::gettimeofday_us() >= catchup_deadline_us) {
+                out->code = Code::INTERNAL;
+                out->message = "local node behind requested revision, retry";
+                out->current_revision = store->CurrentRevision();
+                return false;
+            }
+            bthread_usleep(5000);  // 挂起当前 bthread，不占 pthread worker
+        }
     }
 
     // 2) 先注册后重放：关闭"历史重放"与"广播新事件"之间的窗口。
