@@ -3,12 +3,21 @@
 #include <utility>
 
 #include "braft/raft.h"
+#include "bthread/bthread.h"
 #include "butil/endpoint.h"
 #include "butil/iobuf.h"
+#include "butil/time.h"
 #include "common/log.h"
 #include "watch/watch_hub.h"
 
 namespace configraft {
+
+namespace {
+// 线性一致读等待上限（毫秒）。lease 从 NOT_READY 到 VALID 需一次心跳往返，
+// 一个 election_timeout 足够；applied 追平 commit 同理。
+constexpr int64_t kLeaseWaitMs = 1000;
+constexpr int64_t kCatchupWaitMs = 1000;
+}  // namespace
 
 RaftNode::RaftNode(WatchHub* hub) : hub_(hub) {}
 
@@ -108,12 +117,29 @@ void RaftNode::Apply(const RaftCmd& cmd, ApplyResult* out) {
 // ---------------- 读路径 ----------------
 
 void RaftNode::Get(const std::string& key, bool serializable, GetResult* out) {
-    if (!serializable && !IsLeader()) {
-        // 线性一致读要求 Leader（M5 起以 ReadIndex 保证，目前先直接 Leader 读）
-        out->code = Code::NOT_LEADER;
-        out->leader_id = LeaderId();
-        return;
+    if (!serializable) {
+        // 线性一致读（M5，lease-based）：braft v1.1.2 无 read_index API，用内置 leader lease。
+        //   LEASE_VALID ⟹ 本任期首条配置日志（=no-op）已提交 ⟹ commit 覆盖先前任期已提交写
+        //   ⟹ (Leader Completeness) 本地状态机含所有已提交写；再等 applied≥commit 补齐异步 apply。
+        if (!WaitLeaderLease(kLeaseWaitMs)) {
+            if (IsLeader()) {
+                // 是 leader 但 lease 未就绪（NOT_READY 超时 / 被禁用）：不能填 LeaderId()
+                // 自我重定向（死循环），报 INTERNAL 让客户端重试。
+                out->code = Code::INTERNAL;
+                out->message = "leader not ready for linearizable read, retry";
+            } else {
+                out->code = Code::NOT_LEADER;
+                out->leader_id = LeaderId();
+            }
+            return;
+        }
+        if (!WaitAppliedCatchUp(kCatchupWaitMs)) {
+            out->code = Code::INTERNAL;
+            out->message = "apply catch-up timeout";
+            return;
+        }
     }
+    // serializable=true：降级读，允许任意节点本地读（最终一致，可容忍过期）。
     KV kv;
     int32_t code = 0;
     if (!store_->Get(key, &kv, &code)) {
@@ -123,6 +149,49 @@ void RaftNode::Get(const std::string& key, bool serializable, GetResult* out) {
     }
     out->code = Code::OK;
     out->kv = std::move(kv);
+}
+
+bool RaftNode::WaitLeaderLease(int64_t timeout_ms) {
+    if (!node_) {
+        return false;
+    }
+    const int64_t deadline_us = butil::gettimeofday_us() + timeout_ms * 1000LL;
+    while (true) {
+        braft::LeaderLeaseStatus st;
+        node_->get_leader_lease_status(&st);
+        switch (st.state) {
+            case braft::LEASE_VALID:
+                return true;
+            case braft::LEASE_EXPIRED:   // 已让位/失去多数派，非 leader
+            case braft::LEASE_DISABLED:  // flag 未开启（部署配置错误）
+                return false;
+            default:  // NOT_READY：刚当选，配置条目/心跳未确认 → 内部分自旋
+                if (butil::gettimeofday_us() >= deadline_us) {
+                    return false;
+                }
+                bthread_usleep(5000);  // 挂起当前 bthread，不占 pthread worker
+        }
+    }
+}
+
+bool RaftNode::WaitAppliedCatchUp(int64_t timeout_ms) {
+    if (!node_) {
+        return false;
+    }
+    const int64_t deadline_us = butil::gettimeofday_us() + timeout_ms * 1000LL;
+    while (true) {
+        // 单次 get_status 采样同时取 applied/commit，避免跨快照误判
+        //（读到较新的 applied、较旧的 commit 会误以为已追上）。
+        braft::NodeStatus status;
+        node_->get_status(&status);
+        if (status.known_applied_index >= status.committed_index) {
+            return true;
+        }
+        if (butil::gettimeofday_us() >= deadline_us) {
+            return false;
+        }
+        bthread_usleep(100);
+    }
 }
 
 void RaftNode::GetConfig(const std::string& key, int64_t version, ConfigResult* out) {

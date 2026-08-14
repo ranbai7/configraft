@@ -76,6 +76,26 @@ void ApplyRollback(Store* store, const RaftCmd::RollbackCmd& cmd, ApplyResult* o
     out->events.push_back(MakeEvent(out->kv));
 }
 
+void ApplyCas(Store* store, const RaftCmd::CompareAndSwapCmd& cmd, ApplyResult* out) {
+    int32_t code = 0;
+    KV kv;
+    const int64_t rev =
+        store->CompareAndSwap(cmd.key(), cmd.expect(), cmd.value(), &kv, &code);
+    if (rev < 0) {
+        if (code == Code::CAS_FAILED) {
+            out->code = Code::CAS_FAILED;
+            out->message = "expect value mismatch";
+        } else {
+            out->code = Code::INTERNAL;
+            out->message = "store cas failed";
+        }
+        return;
+    }
+    out->code = Code::OK;
+    out->kv = std::move(kv);
+    out->events.push_back(MakeEvent(out->kv));  // CAS 成功是一次 PUT
+}
+
 void ApplyBatch(Store* store, const RaftCmd::BatchPutCmd& cmd, ApplyResult* out) {
     std::vector<std::pair<std::string, std::string>> kvs;
     kvs.reserve(cmd.puts_size());
@@ -111,9 +131,8 @@ void ApplyCmdToStore(Store* store, const RaftCmd& cmd, ApplyResult* out) {
             ApplyBatch(store, cmd.batch_put(), out);
             break;
         case RaftCmd::CmdCase::kCas:
-            // M5 实现 CAS（比较-写入，串行 apply 天然原子）
-            out->code = Code::INTERNAL;
-            out->message = "CAS not implemented yet";
+            // CAS：比较-写入整体作为一条日志进 Raft，on_apply 串行执行，天然原子（M5）
+            ApplyCas(store, cmd.cas(), out);
             break;
         case RaftCmd::CmdCase::kPublish:
             ApplyPublish(store, cmd.publish(), out);

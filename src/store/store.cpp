@@ -137,6 +137,62 @@ int64_t Store::Delete(const std::string& key, KV* out_kv) {
     return rev;
 }
 
+int64_t Store::CompareAndSwap(const std::string& key, const std::string& expect,
+                              const std::string& value, KV* out_kv, int32_t* code) {
+    if (code) {
+        *code = Code::OK;
+    }
+
+    // 用主索引的 existed 位区分"不存在/tombstone"与"存在且值为空串"两种 absent 语义。
+    KV old_kv;
+    const bool existed = ReadMain(key, &old_kv);
+    const bool absent = !existed || old_kv.deleted();
+
+    // 比较-交换：expect 空串 = 期望不存在（含 tombstone）。
+    const bool matched =
+        expect.empty() ? absent : (!absent && old_kv.value() == expect);
+    if (!matched) {
+        if (code) {
+            *code = Code::CAS_FAILED;
+        }
+        return -1;  // 失败不消耗全局 revision（先比较后分配）
+    }
+
+    // 匹配成功：走与 Put 相同的写路径（分配新 revision + 主索引 + 历史版本）
+    const int64_t rev = NextRevision();
+    if (rev < 0) {
+        if (code) {
+            *code = Code::INTERNAL;
+        }
+        return -1;
+    }
+
+    KV new_kv;
+    new_kv.set_key(key);
+    new_kv.set_value(value);
+    new_kv.set_version(existed ? old_kv.version() + 1 : 1);
+    new_kv.set_revision(rev);
+    new_kv.set_deleted(false);
+
+    std::string serialized;
+    SerializeKV(new_kv, &serialized);
+
+    leveldb::WriteBatch batch;
+    batch.Put(storekey::MainKey(key), serialized);
+    batch.Put(storekey::VersionKey(rev, key), serialized);
+    const leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
+    if (!s.ok()) {
+        if (code) {
+            *code = Code::INTERNAL;
+        }
+        return -1;
+    }
+    if (out_kv) {
+        *out_kv = std::move(new_kv);
+    }
+    return rev;
+}
+
 int64_t Store::BatchPut(
     const std::vector<std::pair<std::string, std::string>>& kvs,
     std::vector<KV>* out_kvs) {

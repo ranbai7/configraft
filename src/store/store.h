@@ -36,6 +36,13 @@ public:
     // 失败返回 -1。
     int64_t Put(const std::string& key, const std::string& value, KV* out_kv);
     int64_t Delete(const std::string& key, KV* out_kv);          // 写 tombstone
+    // 比较-交换（M5）：expect 与当前值比较，匹配则像 Put 一样写入（新 revision）并填 out_kv。
+    //   - expect=="" 表示期望 key 不存在（含 tombstone 视为不存在）；无法表达"期望值为空串"。
+    //   - 匹配：返回新 revision，*code=OK，out_kv 填新 KV。
+    //   - 不匹配：返回 -1 且 *code=CAS_FAILED（不消耗全局 revision、不产生 Watch 事件）。
+    //   - 内部错误：返回 -1 且 *code=INTERNAL。
+    int64_t CompareAndSwap(const std::string& key, const std::string& expect,
+                           const std::string& value, KV* out_kv, int32_t* code);
     int64_t BatchPut(const std::vector<std::pair<std::string, std::string>>& kvs,
                      std::vector<KV>* out_kvs);
 

@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 
 #include "store/store.h"
+#include "store/store_ops.h"
 
 using namespace configraft;
 
@@ -182,4 +183,122 @@ TEST_F(StoreTest, CompactionKeepsLatestVersions) {
     std::vector<KV> history;
     store_.GetHistory("cfg", &history);
     EXPECT_EQ(history.size(), 5u);
+}
+
+// ---------------- M5：CAS 原子更新 ----------------
+
+TEST_F(StoreTest, CasSuccessUpdatesValue) {
+    store_.Put("k", "old", nullptr);
+    const int64_t before = store_.CurrentRevision();
+
+    KV out;
+    int32_t code = -1;
+    const int64_t rev = store_.CompareAndSwap("k", "old", "new", &out, &code);
+    ASSERT_GT(rev, 0);
+    EXPECT_EQ(code, Code::OK);
+    EXPECT_EQ(out.value(), "new");
+    EXPECT_EQ(out.version(), 2);
+    EXPECT_EQ(out.revision(), rev);
+    EXPECT_EQ(rev, before + 1);  // 成功消耗一个新 revision
+}
+
+TEST_F(StoreTest, CasExpectMismatchNoRevisionConsumed) {
+    store_.Put("k", "old", nullptr);
+    const int64_t before = store_.CurrentRevision();
+
+    KV out;
+    int32_t code = -1;
+    const int64_t rev = store_.CompareAndSwap("k", "wrong", "new", &out, &code);
+    EXPECT_LT(rev, 0);
+    EXPECT_EQ(code, Code::CAS_FAILED);
+    EXPECT_EQ(store_.CurrentRevision(), before);  // 失败不消耗 revision
+
+    // 原值未被改动
+    KV cur;
+    int32_t gcode = 0;
+    ASSERT_TRUE(store_.Get("k", &cur, &gcode));
+    EXPECT_EQ(cur.value(), "old");
+}
+
+TEST_F(StoreTest, CasAbsentWithEmptyExpect) {
+    KV out;
+    int32_t code = -1;
+    const int64_t rev = store_.CompareAndSwap("k", "", "v1", &out, &code);
+    ASSERT_GT(rev, 0);
+    EXPECT_EQ(code, Code::OK);
+    EXPECT_EQ(out.version(), 1);
+}
+
+TEST_F(StoreTest, CasAbsentWithNonEmptyExpect) {
+    KV out;
+    int32_t code = -1;
+    EXPECT_LT(store_.CompareAndSwap("k", "x", "v1", &out, &code), 0);
+    EXPECT_EQ(code, Code::CAS_FAILED);
+}
+
+TEST_F(StoreTest, CasRebuildAfterDelete) {
+    store_.Put("k", "v1", nullptr);
+    store_.Delete("k", nullptr);
+    // tombstone 视为不存在：expect="" 可重建，version 延续 tombstone 计数
+    KV out;
+    int32_t code = -1;
+    const int64_t rev = store_.CompareAndSwap("k", "", "v2", &out, &code);
+    ASSERT_GT(rev, 0);
+    EXPECT_EQ(code, Code::OK);
+    EXPECT_EQ(out.value(), "v2");
+    EXPECT_EQ(out.version(), 3);  // Put(v1) + Delete + CAS = 第 3 次修改
+}
+
+TEST_F(StoreTest, CasEmptyValueIsNotAbsent) {
+    // 存在且值为空串：expect="" 表示"期望不存在"，故不匹配（歧义文档化：
+    // CAS 无法用空 expect 表达"期望值为空串"，更新空串值请用 Put）
+    store_.Put("k", "", nullptr);
+    KV out;
+    int32_t code = -1;
+    EXPECT_LT(store_.CompareAndSwap("k", "", "v1", &out, &code), 0);
+    EXPECT_EQ(code, Code::CAS_FAILED);
+
+    // 再次调用值仍为空串（首次失败未改动），依旧不匹配
+    code = -1;
+    EXPECT_LT(store_.CompareAndSwap("k", "", "v1", &out, &code), 0);
+    EXPECT_EQ(code, Code::CAS_FAILED);
+
+    // 用 Put 可更新空串值（CAS 语义上的已知歧义）
+    store_.Put("k", "v1", nullptr);
+    KV cur;
+    int32_t gcode = 0;
+    ASSERT_TRUE(store_.Get("k", &cur, &gcode));
+    EXPECT_EQ(cur.value(), "v1");
+}
+
+// CAS 走 ApplyCmdToStore（on_apply 同一路径）：成功产生 PUT 事件，失败无事件
+TEST_F(StoreTest, ApplyCmdCasEmitsEventOnSuccess) {
+    store_.Put("k", "old", nullptr);  // seed
+
+    RaftCmd cmd;
+    auto* cas = cmd.mutable_cas();
+    cas->set_key("k");
+    cas->set_expect("old");
+    cas->set_value("new");
+
+    ApplyResult result;
+    ApplyCmdToStore(&store_, cmd, &result);
+    ASSERT_EQ(result.code, Code::OK);
+    ASSERT_EQ(result.events.size(), 1u);
+    EXPECT_EQ(result.events[0].type(), "PUT");
+    EXPECT_EQ(result.events[0].key(), "k");
+    EXPECT_EQ(result.events[0].value(), "new");
+}
+
+TEST_F(StoreTest, ApplyCmdCasFailedNoEvent) {
+    RaftCmd cmd;
+    auto* cas = cmd.mutable_cas();
+    cas->set_key("k");        // 不存在
+    cas->set_expect("old");   // 期望存在但实际不存在 → 不匹配
+    cas->set_value("new");
+
+    ApplyResult result;
+    ApplyCmdToStore(&store_, cmd, &result);
+    EXPECT_EQ(result.code, Code::CAS_FAILED);
+    EXPECT_TRUE(result.events.empty());
 }

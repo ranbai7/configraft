@@ -41,6 +41,14 @@ public:
     // @ConfigNode
     void Apply(const RaftCmd& cmd, ApplyResult* out) override;
     void Get(const std::string& key, bool serializable, GetResult* out) override;
+
+    // ---- 线性一致读辅助（M5） ----
+    // 等待 leader lease 变为 VALID（数据追平且无脑裂双主）。NOT_READY 时内部分自旋至
+    // deadline；EXPIRED/DISABLED 立即返回 false。超时返回 false。
+    bool WaitLeaderLease(int64_t timeout_ms);
+    // 等待本地状态机 applied >= committed（单次 get_status 采样，避免跨快照误判），
+    // 超时返回 false。
+    bool WaitAppliedCatchUp(int64_t timeout_ms);
     void GetConfig(const std::string& key, int64_t version, ConfigResult* out) override;
     void Watch(const std::string& key, int64_t from_revision, int64_t timeout_ms,
                int64_t server_deadline_us, const std::function<bool()>* canceled,
