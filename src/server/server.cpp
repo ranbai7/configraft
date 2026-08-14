@@ -23,6 +23,16 @@ constexpr char kConfigServiceRestMappings[] =
     "/v1/config/* => Rest,";
 constexpr char kWatchServiceRestMappings[] =
     "/v1/watch/* => Rest,";
+// Admin 直接 restful 映射到具体方法（HTTP JSON body 自动解析进 request，
+// 由 brpc allow_http_body_to_pb 支持）：
+//   GET  /healthz     → GetHealth（用 /healthz 而非 /health：brpc 1.17 内置
+//                       HealthService 已占用 /health，短名 health 会与其冲突）
+//   POST /addpeer     → AddPeer（{"peer":"127.0.0.1:8004"}）
+//   POST /removepeer  → RemovePeer（{"peer":"127.0.0.1:8001"}）
+constexpr char kAdminServiceRestMappings[] =
+    "/healthz => GetHealth,"
+    "/addpeer => AddPeer,"
+    "/removepeer => RemovePeer,";
 
 // MVCC 版本回收策略：每 key 保留的最近版本数
 constexpr int kKeepVersions = 10;
@@ -85,6 +95,14 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
                            kWatchServiceRestMappings) != 0) {
         if (err) {
             *err = "fail to add WatchService";
+        }
+        return false;
+    }
+    admin_svc_ = std::make_unique<AdminServiceImpl>(node_.get());
+    if (server_.AddService(admin_svc_.get(), brpc::SERVER_DOESNT_OWN_SERVICE,
+                           kAdminServiceRestMappings) != 0) {
+        if (err) {
+            *err = "fail to add AdminService";
         }
         return false;
     }

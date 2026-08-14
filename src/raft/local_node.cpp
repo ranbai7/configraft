@@ -63,4 +63,14 @@ int LocalNode::Compaction(int keep_versions) {
     return store_->Compaction(keep_versions);
 }
 
+void LocalNode::AddPeer(const std::string& peer, ConfChangeResult* out) {
+    out->code = Code::INTERNAL;
+    out->message = "single-node mode does not support membership change";
+}
+
+void LocalNode::RemovePeer(const std::string& peer, ConfChangeResult* out) {
+    out->code = Code::INTERNAL;
+    out->message = "single-node mode does not support membership change";
+}
+
 }  // namespace configraft

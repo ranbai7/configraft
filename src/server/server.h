@@ -6,6 +6,7 @@
 
 #include "brpc/server.h"
 #include "raft/node.h"
+#include "server/admin_service_impl.h"
 #include "server/config_service_impl.h"
 #include "server/kv_service_impl.h"
 #include "server/watch_service_impl.h"
@@ -51,6 +52,7 @@ private:
     std::unique_ptr<KVServiceImpl> kv_svc_;
     std::unique_ptr<ConfigServiceImpl> config_svc_;
     std::unique_ptr<WatchServiceImpl> watch_svc_;
+    std::unique_ptr<AdminServiceImpl> admin_svc_;  // M6：健康检查 + 成员变更
     brpc::Server server_;
     std::thread compaction_thread_;
     std::atomic<bool> stop_compaction_{false};

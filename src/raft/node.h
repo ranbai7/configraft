@@ -48,6 +48,13 @@ struct WatchResult {
     std::vector<WatchEvent> events;   // 升序（按 revision）
 };
 
+// 成员变更（AddPeer/RemovePeer）结果（M6）。code 语义对齐 configraft.v1.Code：
+// OK / NOT_LEADER（请求落到 Follower，message 含 leader 地址）/ INTERNAL。
+struct ConfChangeResult {
+    int32_t code = Code::OK;
+    std::string message;
+};
+
 // 节点抽象。
 //   - 单机模式（M1）：LocalNode 同步执行；
 //   - 集群模式（M2+）：RaftNode 经 braft 提交复制日志，同步等待 apply 完成。
@@ -75,6 +82,12 @@ public:
     // ---- 维护 ----
     // 回收过期 MVCC 历史版本（每 key 保留最近 keep_versions 个）。返回删除条数。
     virtual int Compaction(int keep_versions) = 0;
+
+    // ---- 成员变更（M6） ----
+    // 在线加入/移除一个 Raft 成员（形如 "127.0.0.1:8004"）。仅 Leader 可执行，
+    // 非 Leader 返回 NOT_LEADER + leader 地址；单机模式（LocalNode）不支持。
+    virtual void AddPeer(const std::string& peer, ConfChangeResult* out) = 0;
+    virtual void RemovePeer(const std::string& peer, ConfChangeResult* out) = 0;
 
     // ---- 元信息（Admin / 监控） ----
     virtual bool IsLeader() const = 0;

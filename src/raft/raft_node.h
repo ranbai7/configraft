@@ -63,6 +63,12 @@ public:
     std::vector<std::string> Peers() const override;
     int64_t CurrentRevision() const override;
 
+    // ---- 成员变更（M6） ----
+    // 同步封装 braft 的 add_peer/remove_peer（异步 Closure → 条件变量等待）。
+    // 仅 Leader 可执行；add_peer 会等待新节点数据追平（快照/日志）后才提交配置。
+    void AddPeer(const std::string& peer, ConfChangeResult* out) override;
+    void RemovePeer(const std::string& peer, ConfChangeResult* out) override;
+
 private:
     std::unique_ptr<Store> store_;
     std::unique_ptr<ConfigraftStateMachine> fsm_;

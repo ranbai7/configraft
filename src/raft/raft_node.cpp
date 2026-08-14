@@ -1,5 +1,10 @@
 #include "raft/raft_node.h"
 
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <string>
 #include <utility>
 
 #include "braft/raft.h"
@@ -17,6 +22,41 @@ namespace {
 // 一个 election_timeout 足够；applied 追平 commit 同理。
 constexpr int64_t kLeaseWaitMs = 1000;
 constexpr int64_t kCatchupWaitMs = 1000;
+
+// 成员变更等待上限。add_peer 内部等新节点追平数据（braft catchup_timeout 默认
+// 较大），remove_peer 等配置变更日志多数派提交。超时后返回，但底层变更仍可能
+// 继续，须提示用户稍后查询确认。
+constexpr int kConfChangeTimeoutSec = 60;
+
+// braft add_peer/remove_peer 的完成句柄（异步，在 bthread 中回调）。
+// 结果缓冲用 shared_ptr 而非裸指针：若上层同步等待超时先返回，closure 仍存活，
+// 将来 Run() 写入 shared_ptr 安全，不会悬垂访问栈上变量。
+struct ConfChangeOutcome {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool done = false;
+    butil::Status status;
+};
+
+class ConfChangeClosure : public braft::Closure {
+public:
+    explicit ConfChangeClosure(std::shared_ptr<ConfChangeOutcome> out)
+        : out_(std::move(out)) {}
+
+    void Run() override {
+        // 自动释放本对象（new 出来的）
+        std::unique_ptr<ConfChangeClosure> self(this);
+        {
+            std::lock_guard<std::mutex> lock(out_->mu);
+            out_->status = status();
+            out_->done = true;
+        }
+        out_->cv.notify_all();
+    }
+
+private:
+    std::shared_ptr<ConfChangeOutcome> out_;
+};
 }  // namespace
 
 RaftNode::RaftNode(WatchHub* hub) : hub_(hub) {}
@@ -281,6 +321,8 @@ std::vector<std::string> RaftNode::Peers() const {
     if (!node_) {
         return result;
     }
+    // braft list_peers 仅 Leader 返回成员（Follower 返回 EPERM），
+    // health 在 Follower 上 peers 为空可接受（可向 Leader 查）。
     std::vector<braft::PeerId> peers;
     if (node_->list_peers(&peers).ok()) {
         for (const auto& p : peers) {
@@ -288,6 +330,90 @@ std::vector<std::string> RaftNode::Peers() const {
         }
     }
     return result;
+}
+
+// ---- 成员变更（M6） ----
+
+void RaftNode::AddPeer(const std::string& peer, ConfChangeResult* out) {
+    if (!node_) {
+        out->code = Code::INTERNAL;
+        out->message = "raft node not initialized";
+        return;
+    }
+    if (!IsLeader()) {
+        out->code = Code::NOT_LEADER;
+        out->message = "not leader, leader=" + LeaderId();
+        return;
+    }
+    braft::PeerId peer_id;
+    if (peer_id.parse(peer.c_str()) != 0) {
+        out->code = Code::INTERNAL;
+        out->message = "invalid peer address `" + peer + "'";
+        return;
+    }
+
+    // 同步提交配置变更：braft 在 bthread 中回调 done，这里阻塞当前 bthread 等待。
+    // add_peer 成功路径：leader 先让新 peer 追平（快照/日志复制），再提交配置日志。
+    auto outcome = std::make_shared<ConfChangeOutcome>();
+    node_->add_peer(peer_id, new ConfChangeClosure(outcome));
+
+    std::unique_lock<std::mutex> lock(outcome->mu);
+    if (!outcome->cv.wait_for(lock, std::chrono::seconds(kConfChangeTimeoutSec),
+                              [&] { return outcome->done; })) {
+        // 超时：底层变更可能仍在进行（新节点追数据很慢 / 网络不通），不能撤销。
+        out->code = Code::INTERNAL;
+        out->message = "add peer timed out after " +
+                       std::to_string(kConfChangeTimeoutSec) +
+                       "s (change may still be in progress), check health later";
+        return;
+    }
+    if (!outcome->status.ok()) {
+        out->code = Code::INTERNAL;
+        out->message = outcome->status.error_str();
+        return;
+    }
+    out->code = Code::OK;
+    out->message = "peer " + peer + " added";
+}
+
+void RaftNode::RemovePeer(const std::string& peer, ConfChangeResult* out) {
+    if (!node_) {
+        out->code = Code::INTERNAL;
+        out->message = "raft node not initialized";
+        return;
+    }
+    if (!IsLeader()) {
+        out->code = Code::NOT_LEADER;
+        out->message = "not leader, leader=" + LeaderId();
+        return;
+    }
+    braft::PeerId peer_id;
+    if (peer_id.parse(peer.c_str()) != 0) {
+        out->code = Code::INTERNAL;
+        out->message = "invalid peer address `" + peer + "'";
+        return;
+    }
+
+    auto outcome = std::make_shared<ConfChangeOutcome>();
+    node_->remove_peer(peer_id, new ConfChangeClosure(outcome));
+
+    std::unique_lock<std::mutex> lock(outcome->mu);
+    if (!outcome->cv.wait_for(lock, std::chrono::seconds(kConfChangeTimeoutSec),
+                              [&] { return outcome->done; })) {
+        out->code = Code::INTERNAL;
+        out->message = "remove peer timed out after " +
+                       std::to_string(kConfChangeTimeoutSec) +
+                       "s (change may still be in progress), check health later";
+        return;
+    }
+    if (!outcome->status.ok()) {
+        out->code = Code::INTERNAL;
+        out->message = outcome->status.error_str();
+        return;
+    }
+    // 若移除的是本 Leader 自身，braft 会在配置提交后让位（ELEADERREMOVED）。
+    out->code = Code::OK;
+    out->message = "peer " + peer + " removed";
 }
 
 int64_t RaftNode::CurrentRevision() const { return store_->CurrentRevision(); }

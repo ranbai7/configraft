@@ -1,0 +1,90 @@
+# Configraft 3 节点集群一键启动
+#
+#   docker compose up -d --build    构建并后台启动
+#   curl http://127.0.0.1:8001/healthz   查看 leader
+#   docker compose down -v          停止并清空数据卷
+#
+# Raft 成员地址用固定 IP（butil::str2endpoint 只支持 IP 字面量，不支持 hostname），
+# 由 compose 网络 ipam 分配；节点间经内置网络通信，宿主端口映射仅用于外部访问。
+services:
+  node1:
+    build: .
+    image: configraft:latest
+    container_name: cfg-node1
+    command:
+      - --port=8001
+      - --node=node1
+      - --listen_ip=172.28.0.11
+      - --peers=172.28.0.11:8001,172.28.0.12:8002,172.28.0.13:8003
+      - --data_dir=/data
+      - --election_timeout_ms=1000
+    volumes:
+      - cfg-node1:/data
+    ports:
+      - "8001:8001"
+    networks:
+      default:
+        ipv4_address: 172.28.0.11
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8001/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 15
+
+  node2:
+    image: configraft:latest
+    container_name: cfg-node2
+    command:
+      - --port=8002
+      - --node=node2
+      - --listen_ip=172.28.0.12
+      - --peers=172.28.0.11:8001,172.28.0.12:8002,172.28.0.13:8003
+      - --data_dir=/data
+      - --election_timeout_ms=1000
+    volumes:
+      - cfg-node2:/data
+    ports:
+      - "8002:8002"
+    networks:
+      default:
+        ipv4_address: 172.28.0.12
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8002/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 15
+
+  node3:
+    image: configraft:latest
+    container_name: cfg-node3
+    command:
+      - --port=8003
+      - --node=node3
+      - --listen_ip=172.28.0.13
+      - --peers=172.28.0.11:8001,172.28.0.12:8002,172.28.0.13:8003
+      - --data_dir=/data
+      - --election_timeout_ms=1000
+    volumes:
+      - cfg-node3:/data
+    ports:
+      - "8003:8003"
+    networks:
+      default:
+        ipv4_address: 172.28.0.13
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8003/healthz"]
+      interval: 5s
+      timeout: 2s
+      retries: 15
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  cfg-node1:
+  cfg-node2:
+  cfg-node3:

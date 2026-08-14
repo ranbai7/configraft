@@ -1,0 +1,11 @@
+# 排除不会打进镜像的大目录，加快构建上下文传输
+.git
+third_party/src
+third_party/install/include
+third_party/install/lib/*.a
+*.log
+build/tests
+build/*_test
+build/configraft_client
+build/CMakeFiles
+build/CTestTestfile.cmake

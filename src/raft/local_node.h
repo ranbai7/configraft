@@ -24,6 +24,10 @@ public:
 
     int Compaction(int keep_versions) override;
 
+    // 单机模式无 Raft 成员，成员变更不支持
+    void AddPeer(const std::string& peer, ConfChangeResult* out) override;
+    void RemovePeer(const std::string& peer, ConfChangeResult* out) override;
+
     bool IsLeader() const override { return true; }
     std::string LeaderId() const override { return ""; }
     std::string Role() const override { return "leader"; }
