@@ -1,14 +1,13 @@
 #include "raft/raft_node.h"
 
-#include <chrono>
-#include <condition_variable>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <utility>
 
 #include "braft/raft.h"
 #include "bthread/bthread.h"
+#include "bthread/condition_variable.h"
+#include "bthread/mutex.h"
 #include "butil/endpoint.h"
 #include "butil/iobuf.h"
 #include "butil/time.h"
@@ -32,8 +31,10 @@ constexpr int kConfChangeTimeoutSec = 60;
 // 结果缓冲用 shared_ptr 而非裸指针：若上层同步等待超时先返回，closure 仍存活，
 // 将来 Run() 写入 shared_ptr 安全，不会悬垂访问栈上变量。
 struct ConfChangeOutcome {
-    std::mutex mu;
-    std::condition_variable cv;
+    // 用 bthread 同步原语：等待发生在 bthread 中，std::cv 会占住 pthread worker
+    //（高并发写场景下 worker 耗尽假死，见 ApplyClosure 同款注释）。
+    bthread::Mutex mu;
+    bthread::ConditionVariable cv;
     bool done = false;
     butil::Status status;
 };
@@ -47,7 +48,7 @@ public:
         // 自动释放本对象（new 出来的）
         std::unique_ptr<ConfChangeClosure> self(this);
         {
-            std::lock_guard<std::mutex> lock(out_->mu);
+            std::unique_lock<bthread::Mutex> lock(out_->mu);
             out_->status = status();
             out_->done = true;
         }
@@ -139,7 +140,10 @@ void RaftNode::Apply(const RaftCmd& cmd, ApplyResult* out) {
     butil::IOBufAsZeroCopyOutputStream wrapper(&log);
     cmd.SerializeToZeroCopyStream(&wrapper);
 
-    auto* closure = new ApplyClosure(out);
+    // WaitState 独立于 closure（shared_ptr）：closure 在 Run() 中 delete 自身，
+    // 等待状态须存活到 Wait() 返回之后（避免 UAF，见 ApplyClosure 注释）。
+    auto wait_state = std::make_shared<ApplyClosure::WaitState>();
+    auto* closure = new ApplyClosure(out, wait_state);
     braft::Task task;
     task.data = &log;
     task.done = closure;
@@ -357,9 +361,14 @@ void RaftNode::AddPeer(const std::string& peer, ConfChangeResult* out) {
     auto outcome = std::make_shared<ConfChangeOutcome>();
     node_->add_peer(peer_id, new ConfChangeClosure(outcome));
 
-    std::unique_lock<std::mutex> lock(outcome->mu);
-    if (!outcome->cv.wait_for(lock, std::chrono::seconds(kConfChangeTimeoutSec),
-                              [&] { return outcome->done; })) {
+    // bthread cv 无带谓词的 wait_for，用 100ms 粒度轮询实现超时
+    std::unique_lock<bthread::Mutex> lock(outcome->mu);
+    const int64_t deadline_us =
+        butil::gettimeofday_us() + kConfChangeTimeoutSec * 1000000LL;
+    while (!outcome->done && butil::gettimeofday_us() < deadline_us) {
+        outcome->cv.wait_for(lock, 100000);
+    }
+    if (!outcome->done) {
         // 超时：底层变更可能仍在进行（新节点追数据很慢 / 网络不通），不能撤销。
         out->code = Code::INTERNAL;
         out->message = "add peer timed out after " +
@@ -397,9 +406,13 @@ void RaftNode::RemovePeer(const std::string& peer, ConfChangeResult* out) {
     auto outcome = std::make_shared<ConfChangeOutcome>();
     node_->remove_peer(peer_id, new ConfChangeClosure(outcome));
 
-    std::unique_lock<std::mutex> lock(outcome->mu);
-    if (!outcome->cv.wait_for(lock, std::chrono::seconds(kConfChangeTimeoutSec),
-                              [&] { return outcome->done; })) {
+    std::unique_lock<bthread::Mutex> lock(outcome->mu);
+    const int64_t deadline_us =
+        butil::gettimeofday_us() + kConfChangeTimeoutSec * 1000000LL;
+    while (!outcome->done && butil::gettimeofday_us() < deadline_us) {
+        outcome->cv.wait_for(lock, 100000);
+    }
+    if (!outcome->done) {
         out->code = Code::INTERNAL;
         out->message = "remove peer timed out after " +
                        std::to_string(kConfChangeTimeoutSec) +

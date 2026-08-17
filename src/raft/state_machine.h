@@ -1,10 +1,10 @@
 #pragma once
-#include <condition_variable>
 #include <memory>
-#include <mutex>
 
 #include "braft/raft.h"
 #include "braft/snapshot.h"
+#include "bthread/condition_variable.h"
+#include "bthread/mutex.h"
 #include "butil/atomicops.h"
 #include "configraft.pb.h"
 #include "raft/node.h"
@@ -23,35 +23,45 @@ class WatchHub;  // watch/watch_hub.h
 // 此时 status() 携带错误。
 class ApplyClosure : public braft::Closure {
 public:
-    explicit ApplyClosure(ApplyResult* out) : out_(out), done_(false) {}
+    // 等待状态独立于本对象（shared_ptr 管理）：Run() 在 braft 线程中 `delete this`，
+    // 等待侧须在 this 释放后仍能安全等待。bthread::cv 的 wait 挂起 bthread 并释放
+    // pthread worker——高并发写下 std::cv 会占满 worker 导致节点假死（压测复现）。
+    struct WaitState {
+        bthread::Mutex mu;
+        bthread::ConditionVariable cv;
+        bool done = false;
+    };
+
+    explicit ApplyClosure(ApplyResult* out, std::shared_ptr<WaitState> st)
+        : out_(out), st_(std::move(st)) {}
 
     // on_apply 中调用：填充串行 apply 的结果（在 Run 之前）。
     void Finish(const ApplyResult& result) { *out_ = result; }
 
     void Run() override {
-        // 自动释放本对象（new 出来的）
+        // 自动释放本对象（new 出来的）；st_ 由 shared_ptr 管理，独立存活
         std::unique_ptr<ApplyClosure> self(this);
         if (!status().ok() && out_->code == Code::OK) {
             out_->code = Code::INTERNAL;
             out_->message = status().error_str();
         }
         {
-            std::lock_guard<std::mutex> lock(mu_);
-            done_ = true;
+            std::unique_lock<bthread::Mutex> lock(st_->mu);
+            st_->done = true;
         }
-        cv_.notify_one();
+        st_->cv.notify_one();
     }
 
     void Wait() {
-        std::unique_lock<std::mutex> lock(mu_);
-        cv_.wait(lock, [this] { return done_; });
+        // 先复制 shared_ptr：this 可能在等待期间被 Run() delete，st 保证存活。
+        std::shared_ptr<WaitState> st = st_;
+        std::unique_lock<bthread::Mutex> lock(st->mu);
+        st->cv.wait(lock, [&] { return st->done; });
     }
 
 private:
     ApplyResult* out_;
-    std::mutex mu_;
-    std::condition_variable cv_;
-    bool done_;
+    std::shared_ptr<WaitState> st_;
 };
 
 // braft 复制状态机：持有 Store，on_apply 串行应用复制日志。
