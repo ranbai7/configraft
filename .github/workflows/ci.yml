@@ -1,0 +1,48 @@
+# Configraft 持续集成：每次 push/PR 在干净 Ubuntu 上从零构建 + 跑全部测试。
+#
+# 流水线：
+#   1. 安装系统依赖（cmake/gcc/curl + leveldb/gflags/ssl/snappy）
+#   2. 跑 scripts/build_deps.sh 从源码构建 protobuf/brpc/braft/gtest（幂等，codeload 回退）
+#   3. cmake 构建 configraft_server/client
+#   4. ctest 跑 store_test / watch_test / raft_cas_test
+#
+# 第三方依赖（third_party/install）用 actions/cache 缓存：首次约 30-60 分钟，
+# 之后命中缓存 <5 分钟。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake curl \
+            libssl-dev libgflags-dev libleveldb-dev libsnappy-dev zlib1g-dev
+
+      - name: 缓存第三方依赖（protobuf/brpc/braft/gtest 源码与产物）
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: third_party-${{ runner.os }}-${{ hashFiles('scripts/build_deps.sh') }}
+          restore-keys: |
+            third_party-${{ runner.os }}-
+
+      - name: 构建第三方依赖
+        run: scripts/build_deps.sh
+
+      - name: 构建项目
+        run: |
+          cmake -B build
+          cmake --build build -j$(nproc)
+
+      - name: 运行全部测试
+        run: ctest --test-dir build --output-on-failure
