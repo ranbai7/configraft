@@ -30,12 +30,19 @@ async function fetchJson(url, opts) {
 
 async function discover() {
   try {
-    const h = await fetchJson(`${location.origin}/healthz`);
+    // 用相对路径（页面必须通过 http://<host>:<port>/dashboard 访问；
+    // 直接双击 index.html 是 file:// 协议，fetch 会失败并走到下方提示）。
+    const h = await fetchJson("/healthz");
     state.leader = parseEndpoint(h.leader_id) || state.leader;
     const peers = (h.peers || []).map(parseEndpoint).filter(Boolean);
     if (peers.length) state.nodes = peers;
   } catch (e) {
-    /* 集群未就绪，稍后重试 */
+    const wrap = $("nodes");
+    wrap.innerHTML =
+      `<div class="event-empty">无法连接 /healthz（${escapeHtml(e.message)}）。<br>` +
+      `请确认已运行 <code>bash scripts/run_cluster.sh</code>，并<b>通过 ` +
+      `<code>http://127.0.0.1:800X/dashboard</code> 访问</b>（不要直接双击打开 index.html 文件）。</div>`;
+    return;
   }
   renderNodes(state.nodes.map(() => null));
 }
@@ -197,6 +204,9 @@ async function watchLoop() {
       } else if (j && j.current_revision) {
         state.lastRev = j.current_revision;  // 无事件也推进续传锚点
       }
+      // 无论结果如何都让出 200ms，避免 /v1/watch 快速返回时忙循环
+      // 饿死 setInterval(pollHealth)（否则节点状态会停止刷新）。
+      await sleep(200);
     } catch (e) {
       // Leader 变更或断线：重定位后自动重连
       state.leader = null;
