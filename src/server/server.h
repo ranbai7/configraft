@@ -8,6 +8,7 @@
 #include "raft/node.h"
 #include "server/admin_service_impl.h"
 #include "server/config_service_impl.h"
+#include "server/dashboard_service_impl.h"
 #include "server/kv_service_impl.h"
 #include "server/watch_service_impl.h"
 #include "watch/watch_hub.h"
@@ -23,6 +24,7 @@ struct ServerOptions {
     std::string node_name;  // 为空 → 单机模式（LocalNode）
     std::string peers;      // 例如 "127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003"
     int election_timeout_ms = 1000;
+    std::string web_dir = "web";  // Dashboard 静态资源目录（相对启动 cwd）
 };
 
 // 服务进程组装：Store + ConfigNode(Local/Raft) + 各 protobuf service + brpc Server。
@@ -53,6 +55,7 @@ private:
     std::unique_ptr<ConfigServiceImpl> config_svc_;
     std::unique_ptr<WatchServiceImpl> watch_svc_;
     std::unique_ptr<AdminServiceImpl> admin_svc_;  // M6：健康检查 + 成员变更
+    std::unique_ptr<DashboardServiceImpl> dash_svc_;  // Web 管理界面静态资源
     brpc::Server server_;
     std::thread compaction_thread_;
     std::atomic<bool> stop_compaction_{false};

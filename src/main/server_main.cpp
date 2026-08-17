@@ -17,6 +17,8 @@ DEFINE_string(node, "", "node name, empty for single-node mode (M2: e.g. node1)"
 DEFINE_string(peers, "",
               "raft peers, comma-separated (M2: e.g. 127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003)");
 DEFINE_int32(election_timeout_ms, 1000, "raft election timeout in ms");
+DEFINE_string(web_dir, "web",
+              "dashboard static files dir (relative to cwd), served at /dashboard");
 
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
@@ -33,6 +35,7 @@ int main(int argc, char* argv[]) {
     opts.node_name = FLAGS_node;
     opts.peers = FLAGS_peers;
     opts.election_timeout_ms = FLAGS_election_timeout_ms;
+    opts.web_dir = FLAGS_web_dir;
 
     configraft::ConfigraftServer server;
     std::string err;

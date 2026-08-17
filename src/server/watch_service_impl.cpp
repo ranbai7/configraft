@@ -46,6 +46,9 @@ void WatchServiceImpl::Rest(google::protobuf::RpcController* cntl_base,
                             google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
     brpc::Controller* cntl = rest::Ctl(cntl_base);
+    if (rest::HandleCorsPreflight(cntl)) {
+        return;  // OPTIONS 预检已处理
+    }
     if (cntl->http_request().method() != brpc::HTTP_METHOD_GET) {
         response->set_code(Code::INTERNAL);
         response->set_message("unsupported http method, use GET");

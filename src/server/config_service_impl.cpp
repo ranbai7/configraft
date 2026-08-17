@@ -93,6 +93,9 @@ void ConfigServiceImpl::Rest(google::protobuf::RpcController* cntl_base,
                              google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
     brpc::Controller* cntl = rest::Ctl(cntl_base);
+    if (rest::HandleCorsPreflight(cntl)) {
+        return;  // OPTIONS 预检已处理
+    }
     const std::string& path = cntl->http_request().unresolved_path();
     const brpc::HttpMethod method = cntl->http_request().method();
 

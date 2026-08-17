@@ -3,6 +3,7 @@
 #include <string>
 
 #include "brpc/controller.h"
+#include "brpc/http_method.h"
 #include "configraft.pb.h"
 #include "raft/node.h"
 
@@ -27,6 +28,21 @@ inline std::string ResolveKey(google::protobuf::RpcController* cntl_base,
 
 inline brpc::Controller* Ctl(google::protobuf::RpcController* cntl_base) {
     return static_cast<brpc::Controller*>(cntl_base);
+}
+
+// CORS：Dashboard 页面从 800X 打开、fetch 到 leader 800Y 属于跨端口请求，
+// 必须在每个 HTTP Rest 方法开头调用。返回 true 表示 OPTIONS 预检已处理（可 return）。
+inline bool HandleCorsPreflight(brpc::Controller* cntl) {
+    cntl->http_response().SetHeader("Access-Control-Allow-Origin", "*");
+    cntl->http_response().SetHeader("Access-Control-Allow-Methods",
+                                    "GET,POST,DELETE,OPTIONS");
+    cntl->http_response().SetHeader("Access-Control-Allow-Headers",
+                                    "Content-Type");
+    if (cntl->http_request().method() == brpc::HTTP_METHOD_OPTIONS) {
+        cntl->http_response().set_status_code(200);
+        return true;
+    }
+    return false;
 }
 
 // 读取 URL query-string 参数（Watch 的 from_revision 等），缺省返回 dflt。

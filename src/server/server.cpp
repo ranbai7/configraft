@@ -33,6 +33,11 @@ constexpr char kAdminServiceRestMappings[] =
     "/healthz => GetHealth,"
     "/addpeer => AddPeer,"
     "/removepeer => RemovePeer,";
+// Dashboard 静态资源：/dashboard 与 /dashboard/* 都映射到 Rest 方法
+// （* 匹配部分在 unresolved_path，空路径返回 index.html）。
+constexpr char kDashboardRestMappings[] =
+    "/dashboard => Rest,"
+    "/dashboard/* => Rest,";
 
 // MVCC 版本回收策略：每 key 保留的最近版本数
 constexpr int kKeepVersions = 10;
@@ -103,6 +108,15 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
                            kAdminServiceRestMappings) != 0) {
         if (err) {
             *err = "fail to add AdminService";
+        }
+        return false;
+    }
+    // Web 管理界面：托管 web/ 目录静态文件（/dashboard）。需在 Start 前注册。
+    dash_svc_ = std::make_unique<DashboardServiceImpl>(opts_.web_dir);
+    if (server_.AddService(dash_svc_.get(), brpc::SERVER_DOESNT_OWN_SERVICE,
+                           kDashboardRestMappings) != 0) {
+        if (err) {
+            *err = "fail to add DashboardService";
         }
         return false;
     }

@@ -161,3 +161,12 @@ message SnapshotData {
   int64 revision = 1;
   repeated KV kvs = 2;
 }
+
+// ---------------- Dashboard（Web 管理界面静态资源托管，非业务 RPC） ----------------
+// 仅经 RESTful 映射 "/dashboard/* => Rest" 提供 web/ 目录下的静态文件，
+// 无 gRPC 业务语义，请求/响应复用同一空 message。
+message DashboardHttpRequest {}
+
+service DashboardService {
+  rpc Rest(DashboardHttpRequest) returns (DashboardHttpRequest);
+}

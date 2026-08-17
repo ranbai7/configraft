@@ -2,6 +2,7 @@
 
 #include "brpc/closure_guard.h"
 #include "common/log.h"
+#include "server/rest_util.h"
 
 namespace configraft {
 
@@ -10,6 +11,10 @@ void AdminServiceImpl::GetHealth(google::protobuf::RpcController* cntl_base,
                                  GetHealthResponse* response,
                                  google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl = rest::Ctl(cntl_base);
+    if (rest::HandleCorsPreflight(cntl)) {
+        return;  // OPTIONS 预检已处理
+    }
     // 进程 + 服务存活即可返回 200（HTTP 层由 brpc 保证）；响应携带集群状态，
     // 调用方据此判断是否就绪（role=leader 且 applied≥commit 时完全就绪）。
     response->set_code(Code::OK);
@@ -29,6 +34,10 @@ void AdminServiceImpl::AddPeer(google::protobuf::RpcController* cntl_base,
                                AdminResponse* response,
                                google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl = rest::Ctl(cntl_base);
+    if (rest::HandleCorsPreflight(cntl)) {
+        return;  // OPTIONS 预检已处理
+    }
     ConfChangeResult result;
     node_->AddPeer(request->peer(), &result);
     response->set_code(result.code);
@@ -40,6 +49,10 @@ void AdminServiceImpl::RemovePeer(google::protobuf::RpcController* cntl_base,
                                   AdminResponse* response,
                                   google::protobuf::Closure* done) {
     brpc::ClosureGuard done_guard(done);
+    brpc::Controller* cntl = rest::Ctl(cntl_base);
+    if (rest::HandleCorsPreflight(cntl)) {
+        return;  // OPTIONS 预检已处理
+    }
     ConfChangeResult result;
     node_->RemovePeer(request->peer(), &result);
     response->set_code(result.code);
