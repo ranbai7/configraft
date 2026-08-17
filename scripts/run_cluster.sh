@@ -1,10 +1,40 @@
 #!/usr/bin/env bash
-# 本机一键启动 3 节点 Configraft 集群（Raft 复制验证用）。
+# 本机一键启动/停止 3 节点 Configraft 集群（Raft 复制验证用）。
 #
-# 用法:  scripts/run_cluster.sh [BASE_DIR]
-#   默认 BASE_DIR=/tmp/cfg-cluster，端口 8001/8002/8003。
-# 停止:  kill 对应进程 或  scripts/run_cluster.sh（会先清理旧的）
+# 用法:
+#   scripts/run_cluster.sh              # 启动 3 节点集群（端口 8001-8003，数据 /tmp/cfg-cluster）
+#   scripts/run_cluster.sh [BASE_DIR]   # 自定义数据目录启动
+#   scripts/run_cluster.sh stop         # 一条命令停止集群（kill 所有 configraft 节点进程）
 set -euo pipefail
+
+# stop 参数：停止所有 configraft 节点进程。
+# 用 pgrep -x configraft_serv 精确匹配进程名（内核截断为 15 字符），避免
+# pgrep -f 在部分终端环境（如 Claude Code）误匹配到 shell wrapper。
+if [ "${1:-}" = "stop" ]; then
+    pids="$(pgrep -x configraft_serv || true)"
+    if [ -z "$pids" ]; then
+        echo "没有运行中的 configraft 节点进程。"
+        exit 0
+    fi
+    echo "停止 configraft 节点: $pids"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    sleep 1
+    for pid in $pids; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "  pid=$pid 未正常退出，kill -9 强杀"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+    sleep 1
+    if pgrep -x configraft_serv >/dev/null; then
+        echo "警告：仍有进程未退出："
+        pgrep -ax configraft_serv || true
+        exit 1
+    fi
+    echo "已全部停止（configraft_serv 无残留）。"
+    exit 0
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$REPO_ROOT/build/configraft_server"

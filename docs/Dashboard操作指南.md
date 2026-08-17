@@ -10,6 +10,11 @@ cd configraft
 bash scripts/run_cluster.sh        # 启动 3 节点集群（8001-8003）
 ```
 
+> **演示完毕停止集群**（一条命令，自动清理进程与端口）：
+> ```bash
+> bash scripts/run_cluster.sh stop
+> ```
+
 浏览器打开（任意节点均可，建议先开 leader）：
 
 ```
