@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Configraft · 分布式配置中心</title>
+<!-- 用绝对路径：访问 /dashboard（无尾斜杠）时相对路径 style.css 会解析到 /style.css 而 404 -->
+<link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">C</span>
+    <div>
+      <h1>Configraft</h1>
+      <span class="subtitle">分布式配置中心 · Raft 强一致 · gRPC/HTTP 双协议</span>
+    </div>
+  </div>
+  <div class="cluster-badge" id="clusterBadge">
+    <span class="dot"></span>
+    <span id="clusterLabel">集群</span>
+    <span id="clusterCount">0/0</span>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- 左：集群节点 -->
+  <section class="panel nodes-panel">
+    <div class="panel-head">
+      <h2>集群节点</h2>
+      <span class="hint" id="leaderHint"></span>
+    </div>
+    <div id="nodes" class="node-list"></div>
+  </section>
+
+  <!-- 中：操作面板 -->
+  <section class="panel ops-panel">
+    <div class="panel-head"><h2>配置 / KV 操作</h2></div>
+
+    <div class="field">
+      <label>Key</label>
+      <input id="keyInput" placeholder="如 gateway.rate_limit">
+    </div>
+    <div class="field">
+      <label>Value</label>
+      <input id="valueInput" placeholder="配置值">
+    </div>
+    <div class="btn-row">
+      <button class="primary" data-op="put">写入 Put</button>
+      <button data-op="get">读取 Get</button>
+      <button class="danger" data-op="delete">删除 Delete</button>
+    </div>
+    <div class="field">
+      <label>CAS expect</label>
+      <input id="expectInput" placeholder="期望值（空串=期望不存在）">
+    </div>
+    <div class="btn-row">
+      <button data-op="cas">CAS 原子更新</button>
+      <button data-op="publish">发布新版本 Publish</button>
+    </div>
+    <div class="field">
+      <label>回滚目标版本</label>
+      <input id="verInput" type="number" placeholder="如 1" min="0">
+    </div>
+    <div class="btn-row">
+      <button data-op="cfgget">配置 + 历史</button>
+      <button data-op="rollback">一键回滚 Rollback</button>
+    </div>
+
+    <div class="result-box" id="opResult">
+      <div class="result-empty">操作结果将显示在这里</div>
+    </div>
+    <div class="history-box" id="historyBox"></div>
+  </section>
+
+  <!-- 右：Watch 实时事件流 -->
+  <section class="panel watch-panel">
+    <div class="panel-head">
+      <h2>实时变更流 Watch</h2>
+      <span class="live-tag"><span class="pulse"></span> LIVE</span>
+    </div>
+    <div id="watchEvents" class="watch-stream"></div>
+  </section>
+
+</main>
+
+<script src="/dashboard/app.js"></script>
+</body>
+</html>
