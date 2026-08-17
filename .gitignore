@@ -29,6 +29,7 @@ perf.data
 perf.data.old
 flamegraph-*.svg
 *.html
+!web/index.html   # Dashboard 入口页面需要入库（其余 *.html 仍忽略）
 
 # IDE / OS / Claude Code
 .idea/
