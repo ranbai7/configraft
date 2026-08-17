@@ -35,6 +35,15 @@ public:
     explicit ApplyClosure(ApplyResult* out, std::shared_ptr<WaitState> st)
         : out_(out), st_(std::move(st)) {}
 
+    // 同步等待 apply 完成。必须传独立 WaitState（Apply 侧局部持有），**不能访问
+    // 本对象成员**：braft 可能在 node_->apply() 返回前就调用 Run()（任务快速完成
+    // 或提交即失败），`delete this` 后访问 st_ 是 UAF（fsync=false 高吞吐压测复现
+    // 为 bthread_mutex_lock segfault）。wait 挂起 bthread 释放 pthread worker。
+    static void WaitFor(WaitState& st) {
+        std::unique_lock<bthread::Mutex> lock(st.mu);
+        st.cv.wait(lock, [&] { return st.done; });
+    }
+
     // on_apply 中调用：填充串行 apply 的结果（在 Run 之前）。
     void Finish(const ApplyResult& result) { *out_ = result; }
 
@@ -50,13 +59,6 @@ public:
             st_->done = true;
         }
         st_->cv.notify_one();
-    }
-
-    void Wait() {
-        // 先复制 shared_ptr：this 可能在等待期间被 Run() delete，st 保证存活。
-        std::shared_ptr<WaitState> st = st_;
-        std::unique_lock<bthread::Mutex> lock(st->mu);
-        st->cv.wait(lock, [&] { return st->done; });
     }
 
 private:

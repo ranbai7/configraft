@@ -141,7 +141,7 @@ void RaftNode::Apply(const RaftCmd& cmd, ApplyResult* out) {
     cmd.SerializeToZeroCopyStream(&wrapper);
 
     // WaitState 独立于 closure（shared_ptr）：closure 在 Run() 中 delete 自身，
-    // 等待状态须存活到 Wait() 返回之后（避免 UAF，见 ApplyClosure 注释）。
+    // 等待状态须存活到 WaitFor 返回之后（避免 UAF，见 ApplyClosure 注释）。
     auto wait_state = std::make_shared<ApplyClosure::WaitState>();
     auto* closure = new ApplyClosure(out, wait_state);
     braft::Task task;
@@ -154,8 +154,11 @@ void RaftNode::Apply(const RaftCmd& cmd, ApplyResult* out) {
     }
     node_->apply(task);
 
-    // 阻塞当前 bthread 直到 on_apply 完成（或任务失败）
-    closure->Wait();
+    // 阻塞当前 bthread 直到 on_apply 完成（或任务失败）。
+    // 用独立 wait_state 等待而非 closure->Wait()：braft 可能在 apply() 返回前
+    // 就调用 Run() 并 delete closure（任务快速完成/失败，fsync=false 高吞吐复现），
+    // 访问 closure 成员是 UAF。
+    ApplyClosure::WaitFor(*wait_state);
 }
 
 // ---------------- 读路径 ----------------
