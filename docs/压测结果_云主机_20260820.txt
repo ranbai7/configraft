@@ -1,0 +1,99 @@
+===================================================================
+ Configraft 云主机压测结果（原始证据存档）
+ 压测日期: 2026-08-20  20:05:37  (UTC+8)
+===================================================================
+[1] 测试环境
+  主机名 : iZog97n5ekgo0lfy5m7ytzZ  系统: Linux 5.15.0-186-generic x86_64  内核: 5.15.0-186-generic
+  CPU    : 8 核  Intel(R) Xeon(R) 6982P-C
+  内存   : 14Gi   磁盘: 40G
+
+[2] 被测版本指纹（加锁后最新代码构建产物）
+  configraft_server: md5=bfb2245726aeaf46f3804a53d95bc215  (2026-08-20 19:52:00 +0800)
+  libbraft.so      : md5=dbea6322eafd7764f2520b72b2e93fc3
+
+[3] 工具: ghz=dev  wrk=wrk debian/4.1.0-3build1 
+
+================ A. 3 节点矩阵 (--all --dur 10) 原始输出 ================
+工具: ghz=/root/go/bin/ghz  wrk=/usr/bin/wrk  时长=10s
+矩阵: nodes=3 mode=[single cluster] raft_sync=[true false]
+[env] mode=single raft_sync=true ...
+[env] leader=127.0.0.1:8100
+
+================ single / raft_sync=true / 10s ================
+[single] gRPC Put c8    QPS=28707.78  P99=0.64ms
+[single] gRPC Put c32   QPS=39714.87  P99=1.74ms
+[single] gRPC Put c64   QPS=41795.39  P99=3.14ms
+[single] gRPC Put c128  QPS=38119.41  P99=6.12ms
+[single] gRPC Get c32   QPS=38568.66  P99=1.97ms
+[single] gRPC Get c64   QPS=38570.48  P99=3.59ms
+[single] HTTP GET      QPS=259023.38 P99=3.63ms
+[single] HTTP POST      QPS=101893.59 P99=81.03ms
+[env] mode=single raft_sync=false ...
+[env] leader=127.0.0.1:8100
+
+================ single / raft_sync=false / 10s ================
+[single] gRPC Put c8    QPS=26251.56  P99=0.78ms
+[single] gRPC Put c32   QPS=34117.98  P99=2.24ms
+[single] gRPC Put c64   QPS=36003.08  P99=3.78ms
+[single] gRPC Put c128  QPS=37007.98  P99=6.29ms
+[single] gRPC Get c32   QPS=43894.52  P99=1.43ms
+[single] gRPC Get c64   QPS=45954.26  P99=2.70ms
+[single] HTTP GET      QPS=298723.35 P99=0.44ms
+[single] HTTP POST      QPS=112297.00 P99=47.49ms
+[env] mode=cluster raft_sync=true ...
+[env] leader=127.0.0.1:8003
+
+================ cluster / raft_sync=true / 10s ================
+[cluster] gRPC Put c8    QPS=1806.60   P99=10.31ms
+[cluster] gRPC Put c32   QPS=5617.53   P99=10.62ms
+[cluster] gRPC Put c64   QPS=9951.17   P99=11.55ms
+[cluster] gRPC Put c128  QPS=15958.66  P99=13.04ms
+[cluster] gRPC Get c32   QPS=43684.04  P99=1.43ms
+[cluster] gRPC Get c64   QPS=45245.64  P99=2.84ms
+[cluster] HTTP GET      QPS=274801.22 P99=0.48ms
+[cluster] HTTP POST      QPS=17947.82  P99=12.57ms
+[env] mode=cluster raft_sync=false ...
+[env] leader=127.0.0.1:8003
+
+================ cluster / raft_sync=false / 10s ================
+[cluster] gRPC Put c8    QPS=15883.09  P99=1.44ms
+[cluster] gRPC Put c32   QPS=24962.07  P99=3.24ms
+[cluster] gRPC Put c64   QPS=28179.92  P99=4.65ms
+[cluster] gRPC Put c128  QPS=30969.67  P99=7.10ms
+[cluster] gRPC Get c32   QPS=43476.97  P99=1.40ms
+[cluster] gRPC Get c64   QPS=42497.00  P99=3.31ms
+[cluster] HTTP GET      QPS=271462.34 P99=0.48ms
+[cluster] HTTP POST      QPS=75378.77  P99=4.24ms
+
+=== 压测完成。数据可写入 README「性能与验证」章节（标注测试环境）。 ===
+
+================ B. 5 节点矩阵 (--all --mode cluster --nodes 5 --dur 10) 原始输出 ================
+工具: ghz=/root/go/bin/ghz  wrk=/usr/bin/wrk  时长=10s
+矩阵: nodes=5 mode=[cluster] raft_sync=[true false]
+[env] mode=cluster raft_sync=true ...
+[env] leader=127.0.0.1:8004
+
+================ cluster / raft_sync=true / 10s ================
+[cluster] gRPC Put c8    QPS=1211.98   P99=10.97ms
+[cluster] gRPC Put c32   QPS=4080.90   P99=11.91ms
+[cluster] gRPC Put c64   QPS=7369.29   P99=14.72ms
+[cluster] gRPC Put c128  QPS=12571.81  P99=18.91ms
+[cluster] gRPC Get c32   QPS=43291.25  P99=1.46ms
+[cluster] gRPC Get c64   QPS=44067.78  P99=3.01ms
+[cluster] HTTP GET      QPS=266823.73 P99=0.50ms
+[cluster] HTTP POST      QPS=12975.72  P99=15.53ms
+[env] mode=cluster raft_sync=false ...
+[env] leader=127.0.0.1:8004
+
+================ cluster / raft_sync=false / 10s ================
+[cluster] gRPC Put c8    QPS=12971.48  P99=1.68ms
+[cluster] gRPC Put c32   QPS=21301.91  P99=3.74ms
+[cluster] gRPC Put c64   QPS=24373.12  P99=5.79ms
+[cluster] gRPC Put c128  QPS=27264.36  P99=8.75ms
+[cluster] gRPC Get c32   QPS=43175.21  P99=1.49ms
+[cluster] gRPC Get c64   QPS=40531.95  P99=4.11ms
+[cluster] HTTP GET      QPS=262667.07 P99=0.51ms
+[cluster] HTTP POST      QPS=50378.70  P99=1330.00ms
+
+=== 压测完成。数据可写入 README「性能与验证」章节（标注测试环境）。 ===
+===================================================================
