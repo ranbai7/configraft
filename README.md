@@ -277,17 +277,19 @@ bash scripts/run_cluster.sh stop      # 一条命令停止集群
 
 > **测试环境**：阿里云云主机 · 8 vCPU / 14G 内存 / NVMe SSD · Ubuntu 22.04 · 多节点进程同机（本地环回）· ghz（gRPC）/ wrk（HTTP）· 每项 10s。
 
-| 场景（每项 10s） | 单机 | 3 节点 · 默认持久化 | 3 节点 · 关 fsync | 5 节点 · 默认持久化 | 5 节点 · 关 fsync |
+> **指标格式**：`QPS / P99(ms)`——例 `28.7k / 0.6` = 28.7k QPS、P99 0.6ms；gRPC 按 ×8 / ×64 / ×128 并发，HTTP 固定 100 连接。
+
+| 场景 | 单机 | 3 节点 · 默认持久化 | 3 节点 · 关 fsync | 5 节点 · 默认持久化 | 5 节点 · 关 fsync |
 |---|---|---|---|---|---|
-| gRPC 写 Put · 8 并发 | 28.7k / 0.64ms | 1.8k / 10.3ms | 15.9k / 1.4ms | 1.2k / 11.0ms | 13.0k / 1.7ms |
-| gRPC 写 Put · 64 并发 | 41.8k / 3.1ms | 10.0k / 11.6ms | 28.2k / 4.7ms | 7.4k / 14.7ms | 24.4k / 5.8ms |
-| gRPC 写 Put · 128 并发 | 38.1k / 6.1ms | 16.0k / 13.0ms | 31.0k / 7.1ms | 12.6k / 18.9ms | 27.3k / 8.8ms |
-| gRPC 读 Get · 64 并发 | 38.6k / 3.6ms | 45.2k / 2.8ms | 42.5k / 3.3ms | 44.1k / 3.0ms | 40.5k / 4.1ms |
-| HTTP 读 GET · 100 连接 | 259k / 0.44ms† | 275k / 0.48ms | 271k / 0.48ms | 267k / 0.50ms | 263k / 0.51ms |
-| HTTP 写 POST · 100 连接 | 102k / 47ms† | 17.9k / 12.6ms | 75.4k / 4.2ms | 13.0k / 15.5ms | 50.4k / 1.33s† |
+| gRPC 写 Put ×8 | 28.7k / 0.6 | 1.8k / 10.3 | 15.9k / 1.4 | 1.2k / 11.0 | 13.0k / 1.7 |
+| gRPC 写 Put ×64 | 41.8k / 3.1 | 10.0k / 11.6 | 28.2k / 4.7 | 7.4k / 14.7 | 24.4k / 5.8 |
+| gRPC 写 Put ×128 | 38.1k / 6.1 | 16.0k / 13.0 | 31.0k / 7.1 | 12.6k / 18.9 | 27.3k / 8.8 |
+| gRPC 读 Get ×64 | 38.6k / 3.6 | 45.2k / 2.8 | 42.5k / 3.3 | 44.1k / 3.0 | 40.5k / 4.1 |
+| HTTP 读 GET | 259k / 0.4† | 275k / 0.5 | 271k / 0.5 | 267k / 0.5 | 263k / 0.5 |
+| HTTP 写 POST | 102k / 47† | 17.9k / 12.6 | 75.4k / 4.2 | 13.0k / 15.5 | 50.4k / 1330† |
 
 > ① 数据为 2026-08-20 阿里云实测（8 vCPU / 14G / NVMe SSD / Ubuntu 22.04，多节点进程同机环回），为**审查加固后（commit e5d737b 加锁）当前代码**实测；加锁前后同环境对比差异全部在 ±5% 内（详见 [docs/性能压测报告.md](docs/性能压测报告.md) §6）。
-> ② `†` 单机 fsync=true 组 / 5 节点关 fsync 组的 HTTP P99 受同机压测 CPU 资源竞争影响偏高（读路径与 fsync 无关），QPS 仍稳定；同项在另一 fsync 配置下恢复正常。
+> ② `†` 单机 fsync=true 组 / 5 节点关 fsync 组的 HTTP P99 受同机压测 CPU 资源竞争影响产生长尾噪音（读路径与 fsync 无关），QPS 仍稳定。
 
 **关键结论**：
 
@@ -330,22 +332,6 @@ bash scripts/run_cluster.sh stop      # 一条命令停止集群
 - **CORS 收紧**：`Access-Control-Allow-Origin` 仅回显同主机来源，阻断恶意网页跨站读写（配置 / 成员 / 数据）。
 - **关闭内置服务面板**：brpc `/status` `/vars` 等内部监控页已禁用，避免泄露运行参数。
 - **参数校验**：拒绝空 key（`INVALID_ARGUMENT`）。
-
----
-
-## 文档
-
-| 文档 | 内容 |
-|------|------|
-| [docs/开发计划.md](docs/开发计划.md) | 里程碑规划、简历素材与面试题 |
-| [docs/m5.md](docs/m5.md) / [docs/m6.md](docs/m6.md) / [docs/m7.md](docs/m7.md) | M5 线性读与 CAS、M6 成员变更、M7 性能优化 |
-| [docs/watch.md](docs/watch.md) / [docs/LevelDB.md](docs/LevelDB.md) / [docs/raft一致性算法.md](docs/raft一致性算法.md) | 核心机制深入 |
-| [docs/Dashboard操作指南.md](docs/Dashboard操作指南.md) | Dashboard 逐功能操作与现象解释 |
-| [docs/演示脚本.md](docs/演示脚本.md) | 完整功能演示清单 |
-| [docs/性能压测报告.md](docs/性能压测报告.md) | 云服务器压测原始数据与分析 |
-| [docs/安全审查报告.md](docs/安全审查报告.md) | 全项目代码审查：已修复项 + 未修项 + 设计取舍 |
-| [docs/面试准备.md](docs/面试准备.md) | 简历描述 + 30 分钟讲解稿 + 高频面试题 |
-| [FAQ.md](FAQ.md) / [CONTRIBUTING.md](CONTRIBUTING.md) | 常见问题 / 贡献指南 |
 
 ---
 
