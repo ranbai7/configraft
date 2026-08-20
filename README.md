@@ -237,9 +237,32 @@ ctest --test-dir build
 
 ## 性能与验证
 
-- **压测**：`scripts/benchmark.sh` 使用 ghz / wrk 输出 QPS 与 P99 时延报告。
-- **混沌验证**：`scripts/chaos/` 提供 kill Leader、kill Follower、网络分区、节点重启演练，验证写线性一致、读一致、Watch 有序不丢、集群自动恢复。
-- **性能分析**：`scripts/profile.sh` 生成 perf + 火焰图，定位写路径 / 序列化 / 内存拷贝热点。
+### 压测数据（2026-08 云服务器实测）
+
+> **测试环境**：阿里云云主机 · 8 vCPU / 14G 内存 / NVMe SSD · Ubuntu 22.04 · 多节点进程同机（本地环回）· ghz（gRPC）/ wrk（HTTP）· 每项 10s。
+
+| 场景（每项 10s） | 单机 | 3 节点 · 默认持久化 | 3 节点 · 关 fsync | 5 节点 · 默认持久化 | 5 节点 · 关 fsync |
+|---|---|---|---|---|---|
+| gRPC 写 Put · 8 并发 | 26.4k QPS / P99 0.98ms | 1.8k / 9.1ms | 15.4k / 1.4ms | 1.2k / 12.0ms | 12.4k / 1.7ms |
+| gRPC 写 Put · 64 并发 | 39.4k / 3.2ms | 9.9k / 11.9ms | 27.1k / 5.0ms | 7.4k / 14.1ms | 22.9k / 5.9ms |
+| gRPC 写 Put · 128 并发 | 40.4k / 5.8ms | 16.0k / 13.8ms | 29.4k / 7.8ms | 12.6k / 18.7ms | 24.9k / 9.4ms |
+| gRPC 读 Get · 64 并发 | 45.0k / 2.7ms | 44.2k / 2.9ms | 41.7k / 3.3ms | 43.2k / 3.1ms | 40.0k / 4.1ms |
+| HTTP 读 GET · 100 连接 | 294k / 0.45ms | 275k / 0.50ms | 272k / 0.50ms | 256k / 0.52ms | 261k / 0.52ms |
+| HTTP 写 POST · 100 连接 | 100k / 1.5ms | 17.1k / 12.5ms | 70.7k / 4.5ms | 12.7k / 16.6ms | 53.5k / 6.5ms |
+
+**关键结论**：
+
+1. **读远高于写**：HTTP 读 25–29 万 QPS vs 写 1.2k–29k——符合配置中心"读多写少"业务形态，读路径对任何配置拉取场景都绰绰有余。
+2. **Raft 复制规模代价**：5 节点写吞吐比 3 节点低 15–32%（多数派 2/3 → 3/5，Leader 需同步给更多 Follower 并等多数派确认），而读路径几乎不受影响（Leader Lease 本地读）。代价换来容错升级：3 节点容忍 1 故障、5 节点容忍 2 故障。
+3. **fsync 是写路径最大开销**：默认持久化 vs 关 fsync 相差 8–10 倍——这是"强一致 + 崩溃不丢已提交日志"的固有代价（`--raft_sync=false` 仅压测/演示用）。
+4. **写路径峰值**（8 核 CPU 上限）：单机约 40k、3 节点关 fsync 约 29k、5 节点关 fsync 约 25k QPS（c64→c128 已趋饱和）。
+
+**复现**：`bash scripts/benchmark.sh --all --dur 10`（3 节点）或 `--nodes 5`（5 节点）自动跑完整矩阵；完整报告见 [docs/性能压测报告.md](docs/性能压测报告.md)。
+
+### 验证
+
+- **混沌测试**：`scripts/chaos_test.sh` 执行 kill Leader / kill Follower / 网络分区 / 节点重启演练，验证写线性一致、读一致、Watch 有序不丢、集群自动恢复。
+- **性能分析**：QPS / P99 基线由 `scripts/benchmark.sh` 覆盖；写路径热点（fsync）与优化过程详见 [docs/m7.md](docs/m7.md)。
 
 ---
 
