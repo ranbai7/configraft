@@ -153,7 +153,11 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
 }
 
 ConfigraftServer::~ConfigraftServer() {
-    stop_compaction_ = true;
+    {
+        std::lock_guard<std::mutex> lk(compaction_mu_);
+        stop_compaction_ = true;
+    }
+    compaction_cv_.notify_all();
     if (compaction_thread_.joinable()) {
         compaction_thread_.join();
     }
@@ -163,9 +167,15 @@ void ConfigraftServer::RunUntilAskedToQuit() { server_.RunUntilAskedToQuit(); }
 
 void ConfigraftServer::StartCompactionLoop() {
     compaction_thread_ = std::thread([this] {
+        std::unique_lock<std::mutex> lk(compaction_mu_);
         while (!stop_compaction_.load()) {
-            std::this_thread::sleep_for(
-                std::chrono::seconds(kCompactionIntervalSeconds));
+            // wait_for 而非 sleep_for：析构置 stop 并 notify 后立即唤醒 join，
+            // 服务关停不等满 kCompactionIntervalSeconds（优雅关停）。
+            compaction_cv_.wait_for(
+                lk, std::chrono::seconds(kCompactionIntervalSeconds));
+            if (stop_compaction_.load()) {
+                break;
+            }
             const int removed = node_->Compaction(kKeepVersions);
             if (removed > 0) {
                 LOG(INFO) << "compaction removed " << removed << " stale versions";

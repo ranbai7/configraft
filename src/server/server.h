@@ -1,6 +1,8 @@
 #pragma once
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -59,6 +61,10 @@ private:
     brpc::Server server_;
     std::thread compaction_thread_;
     std::atomic<bool> stop_compaction_{false};
+    // Compaction 循环的等待/唤醒：析构时置 stop 并 notify，立即 join（优雅关停，
+    // 避免 sleep_for(60s) 阻塞服务关停——HTTP 集成测试多起停实例时尤为关键）。
+    std::mutex compaction_mu_;
+    std::condition_variable compaction_cv_;
 };
 
 }  // namespace configraft

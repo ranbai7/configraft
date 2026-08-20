@@ -253,7 +253,7 @@ bash scripts/build_deps.sh
 ```bash
 cmake -B build
 cmake --build build -j4
-ctest --test-dir build          # 3 个测试：store / watch / raft_cas
+ctest --test-dir build          # 4 个测试：store / watch / raft_cas / http（HTTP 路由集成）
 ```
 
 ### 3. 运行
@@ -305,7 +305,7 @@ bash scripts/run_cluster.sh stop      # 一条命令停止集群
 ### 验证
 
 - **混沌测试**：`scripts/chaos_test.sh` 执行 kill Leader / kill Follower / 网络分区 / 节点重启演练，验证写线性一致、读一致、Watch 有序不丢、集群自动恢复。
-- **单测**：`ctest --test-dir build` 覆盖 MVCC 语义、Watch 有序/背压、CAS 并发原子性（含"失败不消耗 revision"断言）。
+- **单测 + HTTP 集成**：`ctest --test-dir build`（4 个测试）覆盖 MVCC 语义、Watch 有序/背压、CAS 并发原子性，以及 **HTTP/RESTful 路由集成**——真实拉起 server，验证路由分发、CORS 收紧、参数校验、错误码、内置服务关闭与 gRPC 共存。
 - **性能分析**：写路径热点（fsync）与优化过程详见 [docs/m7.md](docs/m7.md)。
 
 ---
