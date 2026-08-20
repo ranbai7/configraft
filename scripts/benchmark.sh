@@ -4,6 +4,7 @@
 # 用法:
 #   scripts/benchmark.sh                    # 对【当前运行中】的集群跑默认矩阵
 #   scripts/benchmark.sh --all              # 完整矩阵：fsync 开/关 × 单机/集群，自动启停集群
+#   scripts/benchmark.sh --nodes 5          # 集群节点数（默认 3；--all 时有效）
 #   scripts/benchmark.sh --dur 10           # 每轮压测时长（秒，默认 10）
 #   scripts/benchmark.sh --mode cluster     # 只跑指定模式（single|cluster）
 #   scripts/benchmark.sh --raft-sync false  # 只跑指定 fsync 配置（true|false）
@@ -16,17 +17,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$REPO_ROOT/build/configraft_server"
 DUR=10
 ALL=0
+NODES=3
 MODES=""
 SYNC_MODES=""
 
 usage() {
-    sed -n '2,10p' "$0"
+    sed -n '2,12p' "$0"
     exit 1
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --all) ALL=1 ;;
+        --nodes) NODES="${2:-3}"; shift ;;
         --dur) DUR="${2:-10}"; shift ;;
         --mode) MODES="${2:-}"; shift ;;
         --raft-sync) SYNC_MODES="${2:-}"; shift ;;
@@ -64,18 +67,23 @@ start_cluster() {
         sleep 2
         BENCH_LEADER=8100
     else
-        local peers="127.0.0.1:8001,127.0.0.1:8002,127.0.0.1:8003"
+        # 动态生成 peers（如 5 节点: 127.0.0.1:8001..8005）
+        local peers=""
+        for i in $(seq 1 "$NODES"); do
+            peers="${peers}${peers:+,}127.0.0.1:$((8000 + i))"
+        done
         rm -rf /tmp/cfg-bench-cluster && mkdir -p /tmp/cfg-bench-cluster
-        for i in 1 2 3; do
+        for i in $(seq 1 "$NODES"); do
             local port=$((8000 + i))
             "$BIN" --port "$port" --node "node$i" --peers "$peers" \
                    --data_dir "/tmp/cfg-bench-cluster/node$i" \
                    --election_timeout_ms 1000 --raft_sync="$sync" \
                    > "/tmp/cfg-bench-cluster/node$i.log" 2>&1 &
         done
-        sleep 3
+        # 节点越多选举越慢，给足时间
+        sleep $((2 + NODES))
         BENCH_LEADER=0
-        for i in 1 2 3; do
+        for i in $(seq 1 "$NODES"); do
             if curl -s "http://127.0.0.1:800$i/healthz" | grep -q '"role":"leader"'; then
                 BENCH_LEADER=$((8000 + i)); break
             fi
@@ -139,7 +147,7 @@ run_matrix() {
     curl -s -X POST "http://127.0.0.1:$BENCH_LEADER/v1/kv/bench.key" -d '{"value":"b"}' >/dev/null
 
     if [[ -n "$GHZ" ]]; then
-        for c in 8 32 64; do
+        for c in 8 32 64 128; do
             run_ghz "$label gRPC Put"  configraft.v1.KVService.Put '{"key":"bench.key","value":"bench-value"}' "$c"
         done
         for c in 32 64; do
@@ -160,7 +168,7 @@ run_matrix() {
 
 # ---------------- 主流程 ----------------
 echo "工具: ghz=${GHZ:-缺失}  wrk=${WRK:-缺失}  时长=${DUR}s"
-echo "矩阵: mode=[$MODES] raft_sync=[$SYNC_MODES]"
+echo "矩阵: nodes=$NODES mode=[$MODES] raft_sync=[$SYNC_MODES]"
 
 for mode in $MODES; do
     for sync in $SYNC_MODES; do
@@ -169,7 +177,7 @@ for mode in $MODES; do
         else
             BENCH_LEADER=0
             if [[ "$mode" = "cluster" ]]; then
-                for i in 1 2 3; do
+                for i in $(seq 1 "$NODES"); do
                     if curl -s "http://127.0.0.1:800$i/healthz" | grep -q '"role":"leader"'; then
                         BENCH_LEADER=$((8000 + i)); break
                     fi
