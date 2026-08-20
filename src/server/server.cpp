@@ -123,6 +123,9 @@ bool ConfigraftServer::Init(const ServerOptions& opts, std::string* err) {
 
     brpc::ServerOptions brpc_opts;
     brpc_opts.num_threads = 4;
+    // 关闭 brpc 内置服务（/status /vars /flags /connections /rpcz 等）：共享端口
+    // 面向内网/Dashboard，内置面板会泄露内部指标与运行参数（审查发现 M7）。
+    brpc_opts.has_builtin_services = false;
     if (server_.Start(opts_.port, &brpc_opts) != 0) {
         if (err) {
             *err = "fail to start brpc server on port " + std::to_string(opts_.port);

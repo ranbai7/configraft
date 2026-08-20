@@ -11,6 +11,11 @@ namespace configraft {
 
 void KVServiceImpl::DoPut(const std::string& key, const std::string& value,
                           KVResponse* resp) {
+    if (!rest::IsValidKey(key)) {
+        resp->set_code(Code::INVALID_ARGUMENT);
+        resp->set_message("empty key");
+        return;
+    }
     RaftCmd cmd;
     cmd.mutable_put()->set_key(key);
     cmd.mutable_put()->set_value(value);
@@ -33,6 +38,11 @@ void KVServiceImpl::DoGet(const std::string& key, bool serializable, KVResponse*
 }
 
 void KVServiceImpl::DoDelete(const std::string& key, KVResponse* resp) {
+    if (!rest::IsValidKey(key)) {
+        resp->set_code(Code::INVALID_ARGUMENT);
+        resp->set_message("empty key");
+        return;
+    }
     RaftCmd cmd;
     cmd.mutable_delete_()->set_key(key);
     ApplyResult result;
@@ -44,6 +54,11 @@ void KVServiceImpl::DoBatchPut(const BatchPutRequest& request, KVResponse* resp)
     RaftCmd cmd;
     auto* batch = cmd.mutable_batch_put();
     for (const auto& e : request.entries()) {
+        if (!rest::IsValidKey(e.key())) {
+            resp->set_code(Code::INVALID_ARGUMENT);
+            resp->set_message("batch contains empty key");
+            return;
+        }
         auto* put = batch->add_puts();
         put->set_key(e.key());
         put->set_value(e.value());
@@ -55,6 +70,11 @@ void KVServiceImpl::DoBatchPut(const BatchPutRequest& request, KVResponse* resp)
 
 void KVServiceImpl::DoCAS(const std::string& key, const std::string& expect,
                           const std::string& value, KVResponse* resp) {
+    if (!rest::IsValidKey(key)) {
+        resp->set_code(Code::INVALID_ARGUMENT);
+        resp->set_message("empty key");
+        return;
+    }
     RaftCmd cmd;
     auto* cas = cmd.mutable_cas();
     cas->set_key(key);

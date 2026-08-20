@@ -30,10 +30,46 @@ inline brpc::Controller* Ctl(google::protobuf::RpcController* cntl_base) {
     return static_cast<brpc::Controller*>(cntl_base);
 }
 
+// 判断 Origin 是否来自"与请求目标同主机"的页面（Dashboard 页面从
+// http://<host>:<port>/dashboard 打开、fetch 到同一 host 的另一节点端口，
+// Origin 的 host 与目标 Host 一致）。第三方站点的 Origin host 不同 → 拒绝。
+// 用于替代通配 `Access-Control-Allow-Origin: *`：服务无鉴权，通配 CORS 会让任意
+// 恶意网页跨站读写配置/成员（审查发现 H3）。
+inline bool IsAllowedOrigin(const std::string& origin, const std::string& request_host) {
+    if (origin.empty() || request_host.empty()) {
+        return false;  // 无 Origin（如 curl 等非浏览器）无需 ACAO；Host 缺失保守拒绝
+    }
+    // origin 形如 "http://host[:port]" / "https://host[:port]"
+    const size_t scheme_end = origin.find("://");
+    if (scheme_end == std::string::npos) {
+        return false;
+    }
+    std::string origin_host = origin.substr(scheme_end + 3);
+    // 去掉端口（IPv6 形如 [::1]:port，rfind 后主机部分含括号，仍可比对）
+    const size_t origin_port = origin_host.rfind(':');
+    if (origin_port != std::string::npos) {
+        origin_host = origin_host.substr(0, origin_port);
+    }
+    std::string target_host = request_host;
+    const size_t target_port = target_host.rfind(':');
+    if (target_port != std::string::npos) {
+        target_host = target_host.substr(0, target_port);
+    }
+    return origin_host == target_host;
+}
+
 // CORS：Dashboard 页面从 800X 打开、fetch 到 leader 800Y 属于跨端口请求，
 // 必须在每个 HTTP Rest 方法开头调用。返回 true 表示 OPTIONS 预检已处理（可 return）。
+// 放行策略：仅当 Origin 与请求目标同主机时回显该 Origin（而非通配 *），
+// 既保证 Dashboard 跨端口 fetch 可用，又阻断第三方站点的跨站读写。
 inline bool HandleCorsPreflight(brpc::Controller* cntl) {
-    cntl->http_response().SetHeader("Access-Control-Allow-Origin", "*");
+    // brpc GetHeader 返回 const std::string*（可能为 nullptr）
+    const std::string* origin = cntl->http_request().GetHeader("Origin");
+    const std::string* host = cntl->http_request().GetHeader("Host");
+    if (origin != nullptr && host != nullptr && IsAllowedOrigin(*origin, *host)) {
+        cntl->http_response().SetHeader("Access-Control-Allow-Origin", *origin);
+        cntl->http_response().SetHeader("Vary", "Origin");
+    }
     cntl->http_response().SetHeader("Access-Control-Allow-Methods",
                                     "GET,POST,DELETE,OPTIONS");
     cntl->http_response().SetHeader("Access-Control-Allow-Headers",
@@ -44,6 +80,10 @@ inline bool HandleCorsPreflight(brpc::Controller* cntl) {
     }
     return false;
 }
+
+// 校验请求 key：拒绝空串（审查发现 M5——空 key 会污染 k/ v/ cfg/ 命名空间并
+// 与 REST 保留后缀语义冲突）。key 含 "/"（层级 key）是配置中心的合法用法，不拒绝。
+inline bool IsValidKey(const std::string& key) { return !key.empty(); }
 
 // 读取 URL query-string 参数（Watch 的 from_revision 等），缺省返回 dflt。
 inline int64_t QueryInt64(google::protobuf::RpcController* cntl_base, const char* name,

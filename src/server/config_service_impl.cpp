@@ -11,6 +11,11 @@ namespace configraft {
 
 void ConfigServiceImpl::DoPublish(const std::string& key, const std::string& value,
                                   ConfigResponse* resp) {
+    if (!rest::IsValidKey(key)) {
+        resp->set_code(Code::INVALID_ARGUMENT);
+        resp->set_message("empty key");
+        return;
+    }
     RaftCmd cmd;
     cmd.mutable_publish()->set_key(key);
     cmd.mutable_publish()->set_value(value);
@@ -41,6 +46,11 @@ void ConfigServiceImpl::DoGetConfig(const std::string& key, int64_t version,
 
 void ConfigServiceImpl::DoRollback(const std::string& key, int64_t target_version,
                                    ConfigResponse* resp) {
+    if (!rest::IsValidKey(key)) {
+        resp->set_code(Code::INVALID_ARGUMENT);
+        resp->set_message("empty key");
+        return;
+    }
     RaftCmd cmd;
     cmd.mutable_rollback()->set_key(key);
     cmd.mutable_rollback()->set_target_version(target_version);

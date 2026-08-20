@@ -46,6 +46,14 @@ void ConfigraftStateMachine::on_apply(braft::Iterator& iter) {
             if (closure) {
                 closure->Finish(result);
             }
+            // 应用失败（如 LevelDB 写错误）也向 braft 上报，避免"已提交但未落库"
+            // 被静默吞掉——日志已在集群提交，本节点失败须让上层感知。
+            if (result.code != Code::OK && iter.done()->status().ok()) {
+                const char* err_msg =
+                    result.message.empty() ? "store apply failed"
+                                           : result.message.c_str();
+                iter.done()->status().set_error(EIO, "%s", err_msg);
+            }
         }
     }
 }
@@ -88,22 +96,14 @@ void* ConfigraftStateMachine::save_snapshot(void* arg) {
 
     const std::string path = sa->writer->get_path() + "/data";
 
-    // 用 LevelDB 快照导出一致状态（遍历期间新 apply 不影响导出的数据）
-    leveldb::ReadOptions ro;
-    ro.snapshot = sa->store->db()->GetSnapshot();
+    // 在 Store 内部持共享锁导出一致状态：单个 LevelDB snapshot 下同时读取
+    // revision + 主索引 + 配置版本索引——revision 与数据原子一致（跨节点编号
+    // 不发散），cfg/ 索引随快照恢复（新节点按版本读配置可用）。
     SnapshotData data;
-    data.set_revision(sa->store->CurrentRevision());
-
-    std::unique_ptr<leveldb::Iterator> it(sa->store->db()->NewIterator(ro));
-    for (it->Seek(storekey::MainKey("")); it->Valid() && it->key().starts_with("k/");
-         it->Next()) {
-        KV kv;
-        if (kv.ParseFromString(it->value().ToString())) {
-            data.add_kvs()->CopyFrom(kv);
-        }
+    if (!sa->store->ExportSnapshot(&data)) {
+        sa->done->status().set_error(EIO, "fail to export snapshot");
+        return nullptr;
     }
-    it.reset();
-    sa->store->db()->ReleaseSnapshot(ro.snapshot);
 
     // 序列化快照文件
     braft::ProtoBufFile pb_file(path);

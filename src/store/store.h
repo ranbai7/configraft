@@ -1,11 +1,16 @@
 #pragma once
 #include <memory>
+#include <shared_mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "configraft.pb.h"
 #include "leveldb/db.h"
+
+namespace leveldb {
+class WriteBatch;
+}
 
 namespace configraft {
 
@@ -14,8 +19,15 @@ using namespace v1;  // 协议类型（KV/Code 等）定义在 configraft.v1 包
 // 存储层：LevelDB 封装 + MVCC 语义（参考 etcd v3）。
 //
 // 一致性约定：写路径仅在状态机 on_apply 中串行调用（单 Leader + 串行 apply），
-// 因此 Store 内部无需加锁；读路径是并发的，只读 LevelDB（LevelDB 单线程写，
+// 因此 Store 内部写操作间无需互斥；读路径是并发的，只读 LevelDB（LevelDB 单线程写，
 // 但读线程安全）。
+//
+// 线程安全（2026-08-20 审查加固）：
+//   - 所有公开方法对 db_mu_ 加锁后访问 db_：写/读/Compaction/快照导出持共享锁，
+//     LoadSnapshot（重建整个 DB）持独占锁——杜绝"快照安装期间 db_.reset() 与并发
+//     读/Compaction 竞争导致 use-after-free"。
+//   - 写方法内部对 db_mu_ 只加一次共享锁，方法间调用（Rollback→GetConfig/Publish、
+//     GetConfig→Get、Compaction→CompactRev）走 *Locked 内部实现避免锁重入。
 //
 // LevelDB key 布局见 common/storekey.h。
 class Store {
@@ -32,6 +44,8 @@ public:
 
     // ---------------- 写路径（串行） ----------------
     // 每个写操作：分配新全局 revision → 写主索引 + 历史版本 → 递增 meta/revision。
+    // revision 的递增与主索引/历史同在一个 WriteBatch 原子提交（写失败整体回滚，
+    // 不会出现"revision 已推进但记录缺失"的节点状态发散）。
     // 成功返回新 revision；out_kv 填充写入后的最新 KV（含 version/revision）。
     // 失败返回 -1。
     int64_t Put(const std::string& key, const std::string& value, KV* out_kv);
@@ -83,20 +97,45 @@ public:
     int64_t CurrentRevision() const;
 
     // ---------------- 快照 ----------------
+    // 导出一致性快照数据：在单个 LevelDB snapshot 下读取 revision + 主索引（k/）
+    // + 配置版本索引（cfg/），保证 revision 与数据原子一致（否则跨节点 revision
+    // 编号发散）。braft on_snapshot_save 使用。
+    bool ExportSnapshot(SnapshotData* out) const;
     // 用快照数据重建整个 DB（braft on_snapshot_load 使用）：关闭现有 DB、
-    // 重建目录、批量写入快照的主索引与 revision。data 为空则清空。
+    // 重建目录、批量写入快照的主索引/配置索引与 revision。data 为空则清空。
     bool LoadSnapshot(const SnapshotData& data, std::string* err);
 
-    leveldb::DB* db() const { return db_.get(); }
-
 private:
-    // 读取主索引 KV（不存在返回 false）
-    bool ReadMain(const std::string& key, KV* out) const;
-    // 分配下一个 revision 并写回 meta/revision（仅写路径串行调用）
-    int64_t NextRevision();
+    // ---------------- 内部实现（调用方已持有 db_mu_，不得再加锁） ----------------
+    bool OpenLocked(const std::string& data_dir, std::string* err);
+    bool ReadMainLocked(const std::string& key, KV* out) const;
+    // 分配下一个 revision：读当前值 +1，把新值 Put 进 batch（与业务写同批原子提交，
+    // 写失败时 meta/revision 一并回滚）。仅写路径调用（外部串行 + 本类共享锁）。
+    int64_t NextRevisionLocked(leveldb::WriteBatch* batch);
+    int64_t PutLocked(const std::string& key, const std::string& value, KV* out_kv);
+    int64_t DeleteLocked(const std::string& key, KV* out_kv);
+    int64_t CompareAndSwapLocked(const std::string& key, const std::string& expect,
+                                 const std::string& value, KV* out_kv, int32_t* code);
+    int64_t BatchPutLocked(const std::vector<std::pair<std::string, std::string>>& kvs,
+                           std::vector<KV>* out_kvs);
+    int64_t PublishLocked(const std::string& key, const std::string& value, KV* out_kv);
+    int64_t RollbackLocked(const std::string& key, int64_t target_version, KV* out_kv,
+                           bool* ok);
+    bool GetConfigLocked(const std::string& key, int64_t version, KV* out,
+                         int32_t* code) const;
+    void GetHistoryLocked(const std::string& key, std::vector<KV>* out) const;
+    int CompactionLocked(int keep_versions);
+    bool GetLocked(const std::string& key, KV* out, int32_t* code) const;
+    int64_t CompactRevLocked() const;
+    int64_t CurrentRevisionLocked() const;
+    bool ReplayEventsLocked(int64_t from_revision, int64_t current_revision,
+                            const std::string& key, int max_events,
+                            std::vector<WatchEvent>* out, int32_t* code) const;
     // 序列化 KV 到字符串
     static void SerializeKV(const KV& kv, std::string* out);
 
+    // 保护 db_ 生命周期的共享互斥量：LoadSnapshot（重建 DB）持写锁，其余持读锁。
+    mutable std::shared_mutex db_mu_;
     std::unique_ptr<leveldb::DB> db_;
     std::string data_dir_;  // LevelDB 目录（快照重建时使用）
 };

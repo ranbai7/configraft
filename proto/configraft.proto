@@ -20,6 +20,7 @@ enum Code {
   NOT_LEADER       = 3;   // 写请求落到了 Follower
   VERSION_NOT_FOUND= 4;   // 指定版本不存在（已被 Compaction 回收等）
   COMPACTED        = 5;   // from_revision 之前的历史已被回收
+  INVALID_ARGUMENT = 6;   // 请求参数非法（如空 key）
   INTERNAL         = 100; // 内部错误
 }
 
@@ -160,6 +161,9 @@ message RaftCmd {
 message SnapshotData {
   int64 revision = 1;
   repeated KV kvs = 2;
+  // 配置多版本索引（cfg/ 前缀）随快照一并导出/恢复：否则新节点装快照后
+  // 按版本读配置（GetConfig(version>0)）与历史会丢失。
+  repeated KV cfg_kvs = 3;
 }
 
 // ---------------- Dashboard（Web 管理界面静态资源托管，非业务 RPC） ----------------

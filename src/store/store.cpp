@@ -12,6 +12,11 @@ namespace configraft {
 Store::~Store() { Close(); }
 
 bool Store::Open(const std::string& data_dir, std::string* err) {
+    std::unique_lock lock(db_mu_);
+    return OpenLocked(data_dir, err);
+}
+
+bool Store::OpenLocked(const std::string& data_dir, std::string* err) {
     std::filesystem::create_directories(data_dir);
     leveldb::Options opts;
     opts.create_if_missing = true;
@@ -29,6 +34,7 @@ bool Store::Open(const std::string& data_dir, std::string* err) {
 }
 
 void Store::Close() {
+    std::unique_lock lock(db_mu_);
     if (db_) {
         db_.reset();
     }
@@ -38,7 +44,7 @@ void Store::SerializeKV(const KV& kv, std::string* out) {
     kv.SerializeToString(out);
 }
 
-bool Store::ReadMain(const std::string& key, KV* out) const {
+bool Store::ReadMainLocked(const std::string& key, KV* out) const {
     std::string raw;
     const leveldb::Status s =
         db_->Get(leveldb::ReadOptions(), storekey::MainKey(key), &raw);
@@ -51,30 +57,42 @@ bool Store::ReadMain(const std::string& key, KV* out) const {
     return out->ParseFromString(raw);
 }
 
-int64_t Store::NextRevision() {
+int64_t Store::CurrentRevisionLocked() const {
     std::string raw;
     const leveldb::Status s = db_->Get(
         leveldb::ReadOptions(), storekey::RevisionMetaKey(), &raw);
-    uint64_t rev = 0;
-    if (s.ok()) {
-        rev = storekey::DecodeUint64(raw);
+    if (!s.ok()) {
+        return 0;
     }
-    rev += 1;
-    std::string encoded;
-    storekey::EncodeUint64(rev, &encoded);
-    const leveldb::Status ws =
-        db_->Put(leveldb::WriteOptions(), storekey::RevisionMetaKey(), encoded);
-    if (!ws.ok()) {
-        return -1;
-    }
-    return static_cast<int64_t>(rev);
+    return static_cast<int64_t>(storekey::DecodeUint64(raw));
+}
+
+int64_t Store::CurrentRevision() const {
+    std::shared_lock lock(db_mu_);
+    return CurrentRevisionLocked();
+}
+
+int64_t Store::NextRevisionLocked(leveldb::WriteBatch* batch) {
+    // 读当前值 +1，新值 Put 进调用方的 batch：meta/revision 与业务写（主索引 + 历史）
+    // 同一 WriteBatch 原子提交。写失败时整体回滚，杜绝"revision 已推进但记录缺失"。
+    const int64_t rev = CurrentRevisionLocked() + 1;
+    std::string raw;
+    storekey::EncodeUint64(static_cast<uint64_t>(rev), &raw);
+    batch->Put(storekey::RevisionMetaKey(), raw);
+    return rev;
 }
 
 int64_t Store::Put(const std::string& key, const std::string& value, KV* out_kv) {
-    KV old_kv;
-    bool existed = ReadMain(key, &old_kv);
+    std::shared_lock lock(db_mu_);
+    return PutLocked(key, value, out_kv);
+}
 
-    const int64_t rev = NextRevision();
+int64_t Store::PutLocked(const std::string& key, const std::string& value, KV* out_kv) {
+    KV old_kv;
+    bool existed = ReadMainLocked(key, &old_kv);
+
+    leveldb::WriteBatch batch;
+    const int64_t rev = NextRevisionLocked(&batch);
     if (rev < 0) {
         return -1;
     }
@@ -89,7 +107,6 @@ int64_t Store::Put(const std::string& key, const std::string& value, KV* out_kv)
     std::string serialized;
     SerializeKV(new_kv, &serialized);
 
-    leveldb::WriteBatch batch;
     batch.Put(storekey::MainKey(key), serialized);
     batch.Put(storekey::VersionKey(rev, key), serialized);
     const leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
@@ -103,7 +120,13 @@ int64_t Store::Put(const std::string& key, const std::string& value, KV* out_kv)
 }
 
 int64_t Store::Delete(const std::string& key, KV* out_kv) {
-    const int64_t rev = NextRevision();
+    std::shared_lock lock(db_mu_);
+    return DeleteLocked(key, out_kv);
+}
+
+int64_t Store::DeleteLocked(const std::string& key, KV* out_kv) {
+    leveldb::WriteBatch batch;
+    const int64_t rev = NextRevisionLocked(&batch);
     if (rev < 0) {
         return -1;
     }
@@ -115,7 +138,7 @@ int64_t Store::Delete(const std::string& key, KV* out_kv) {
 
     // 若存在，继承 version 语义：删除也计数（便于理解修改历史）
     KV old_kv;
-    if (ReadMain(key, &old_kv)) {
+    if (ReadMainLocked(key, &old_kv)) {
         kv.set_version(old_kv.version() + 1);
     } else {
         kv.set_version(1);
@@ -124,7 +147,6 @@ int64_t Store::Delete(const std::string& key, KV* out_kv) {
     std::string serialized;
     SerializeKV(kv, &serialized);
 
-    leveldb::WriteBatch batch;
     batch.Put(storekey::MainKey(key), serialized);
     batch.Put(storekey::VersionKey(rev, key), serialized);
     const leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
@@ -139,13 +161,20 @@ int64_t Store::Delete(const std::string& key, KV* out_kv) {
 
 int64_t Store::CompareAndSwap(const std::string& key, const std::string& expect,
                               const std::string& value, KV* out_kv, int32_t* code) {
+    std::shared_lock lock(db_mu_);
+    return CompareAndSwapLocked(key, expect, value, out_kv, code);
+}
+
+int64_t Store::CompareAndSwapLocked(const std::string& key, const std::string& expect,
+                                    const std::string& value, KV* out_kv,
+                                    int32_t* code) {
     if (code) {
         *code = Code::OK;
     }
 
     // 用主索引的 existed 位区分"不存在/tombstone"与"存在且值为空串"两种 absent 语义。
     KV old_kv;
-    const bool existed = ReadMain(key, &old_kv);
+    const bool existed = ReadMainLocked(key, &old_kv);
     const bool absent = !existed || old_kv.deleted();
 
     // 比较-交换：expect 空串 = 期望不存在（含 tombstone）。
@@ -159,7 +188,8 @@ int64_t Store::CompareAndSwap(const std::string& key, const std::string& expect,
     }
 
     // 匹配成功：走与 Put 相同的写路径（分配新 revision + 主索引 + 历史版本）
-    const int64_t rev = NextRevision();
+    leveldb::WriteBatch batch;
+    const int64_t rev = NextRevisionLocked(&batch);
     if (rev < 0) {
         if (code) {
             *code = Code::INTERNAL;
@@ -177,7 +207,6 @@ int64_t Store::CompareAndSwap(const std::string& key, const std::string& expect,
     std::string serialized;
     SerializeKV(new_kv, &serialized);
 
-    leveldb::WriteBatch batch;
     batch.Put(storekey::MainKey(key), serialized);
     batch.Put(storekey::VersionKey(rev, key), serialized);
     const leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
@@ -196,6 +225,13 @@ int64_t Store::CompareAndSwap(const std::string& key, const std::string& expect,
 int64_t Store::BatchPut(
     const std::vector<std::pair<std::string, std::string>>& kvs,
     std::vector<KV>* out_kvs) {
+    std::shared_lock lock(db_mu_);
+    return BatchPutLocked(kvs, out_kvs);
+}
+
+int64_t Store::BatchPutLocked(
+    const std::vector<std::pair<std::string, std::string>>& kvs,
+    std::vector<KV>* out_kvs) {
     if (kvs.empty()) {
         return 0;
     }
@@ -203,14 +239,13 @@ int64_t Store::BatchPut(
     std::vector<KV> new_kvs;
     new_kvs.reserve(kvs.size());
 
+    // 单批内 revision 连续唯一：先读一次当前值，后续本地递增。
+    // （不能逐条调 NextRevision：batch 未提交前直接读 db 会拿到同一值导致 revision 重复）
+    int64_t rev = CurrentRevisionLocked();
     for (const auto& [key, value] : kvs) {
+        ++rev;
         KV old_kv;
-        const bool existed = ReadMain(key, &old_kv);
-
-        const int64_t rev = NextRevision();
-        if (rev < 0) {
-            return -1;
-        }
+        const bool existed = ReadMainLocked(key, &old_kv);
 
         KV new_kv;
         new_kv.set_key(key);
@@ -225,6 +260,9 @@ int64_t Store::BatchPut(
         batch.Put(storekey::VersionKey(rev, key), serialized);
         new_kvs.push_back(std::move(new_kv));
     }
+    std::string raw;
+    storekey::EncodeUint64(static_cast<uint64_t>(rev), &raw);
+    batch.Put(storekey::RevisionMetaKey(), raw);
 
     const leveldb::Status s = db_->Write(leveldb::WriteOptions(), &batch);
     if (!s.ok()) {
@@ -237,10 +275,17 @@ int64_t Store::BatchPut(
 }
 
 int64_t Store::Publish(const std::string& key, const std::string& value, KV* out_kv) {
-    KV old_kv;
-    const bool existed = ReadMain(key, &old_kv);
+    std::shared_lock lock(db_mu_);
+    return PublishLocked(key, value, out_kv);
+}
 
-    const int64_t rev = NextRevision();
+int64_t Store::PublishLocked(const std::string& key, const std::string& value,
+                             KV* out_kv) {
+    KV old_kv;
+    const bool existed = ReadMainLocked(key, &old_kv);
+
+    leveldb::WriteBatch batch;
+    const int64_t rev = NextRevisionLocked(&batch);
     if (rev < 0) {
         return -1;
     }
@@ -255,7 +300,6 @@ int64_t Store::Publish(const std::string& key, const std::string& value, KV* out
     std::string serialized;
     SerializeKV(new_kv, &serialized);
 
-    leveldb::WriteBatch batch;
     batch.Put(storekey::MainKey(key), serialized);
     batch.Put(storekey::VersionKey(rev, key), serialized);
     batch.Put(storekey::ConfigKey(key, new_kv.version()), serialized);
@@ -271,25 +315,37 @@ int64_t Store::Publish(const std::string& key, const std::string& value, KV* out
 
 int64_t Store::Rollback(const std::string& key, int64_t target_version, KV* out_kv,
                         bool* ok) {
+    std::shared_lock lock(db_mu_);
+    return RollbackLocked(key, target_version, out_kv, ok);
+}
+
+int64_t Store::RollbackLocked(const std::string& key, int64_t target_version,
+                              KV* out_kv, bool* ok) {
     if (ok) {
         *ok = false;
     }
     KV target;
     int32_t code = 0;
-    if (!GetConfig(key, target_version, &target, &code)) {
+    if (!GetConfigLocked(key, target_version, &target, &code)) {
         return -1;
     }
     if (ok) {
         *ok = true;
     }
     // 回滚不删历史：把目标版本的值作为新版本发布（对齐 etcd 语义）
-    return Publish(key, target.value(), out_kv);
+    return PublishLocked(key, target.value(), out_kv);
 }
 
 bool Store::GetConfig(const std::string& key, int64_t version, KV* out,
                       int32_t* code) const {
+    std::shared_lock lock(db_mu_);
+    return GetConfigLocked(key, version, out, code);
+}
+
+bool Store::GetConfigLocked(const std::string& key, int64_t version, KV* out,
+                            int32_t* code) const {
     if (version <= 0) {
-        return Get(key, out, code);
+        return GetLocked(key, out, code);
     }
     std::string raw;
     const leveldb::Status s =
@@ -325,18 +381,37 @@ bool Store::GetConfig(const std::string& key, int64_t version, KV* out,
 }
 
 void Store::GetHistory(const std::string& key, std::vector<KV>* out) const {
+    std::shared_lock lock(db_mu_);
+    GetHistoryLocked(key, out);
+}
+
+void Store::GetHistoryLocked(const std::string& key, std::vector<KV>* out) const {
     const std::string prefix = "cfg/" + key + "/";
     leveldb::ReadOptions ro;
     std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(ro));
     for (it->Seek(prefix); it->Valid() && it->key().starts_with(prefix); it->Next()) {
         KV kv;
-        if (kv.ParseFromString(it->value().ToString()) && !kv.deleted()) {
+        if (!kv.ParseFromString(it->value().ToString())) {
+            continue;
+        }
+        // 前缀碰撞防护：cfg/{key}/{ver} 的 key 段是原始字节串，含 "/" 的层级 key
+        // （如 "app" 与 "app/db"）会共享前缀 "cfg/app/"。只返回记录内嵌 key 与
+        // 目标 key 完全一致的版本，避免跨 key 历史泄漏。
+        if (kv.key() != key) {
+            continue;
+        }
+        if (!kv.deleted()) {
             out->push_back(std::move(kv));
         }
     }
 }
 
 int Store::Compaction(int keep_versions) {
+    std::shared_lock lock(db_mu_);
+    return CompactionLocked(keep_versions);
+}
+
+int Store::CompactionLocked(int keep_versions) {
     if (keep_versions < 1) {
         keep_versions = 1;
     }
@@ -386,7 +461,7 @@ int Store::Compaction(int keep_versions) {
         // 与所有 Delete 放同一 WriteBatch 原子提交：读者要么看到"记录已删 + compact_rev 已更新"，
         // 要么都看不到，杜绝 Watch 误放行的中间态。
         const int64_t new_compact_rev =
-            std::max(CompactRev(), max_deleted_rev);
+            std::max(CompactRevLocked(), max_deleted_rev);
         std::string raw;
         storekey::EncodeUint64(static_cast<uint64_t>(new_compact_rev), &raw);
         batch.Put(storekey::CompactRevKey(), raw);
@@ -396,8 +471,13 @@ int Store::Compaction(int keep_versions) {
 }
 
 bool Store::Get(const std::string& key, KV* out, int32_t* code) const {
+    std::shared_lock lock(db_mu_);
+    return GetLocked(key, out, code);
+}
+
+bool Store::GetLocked(const std::string& key, KV* out, int32_t* code) const {
     KV kv;
-    if (!ReadMain(key, &kv)) {
+    if (!ReadMainLocked(key, &kv)) {
         if (code) {
             *code = Code::KEY_NOT_FOUND;
         }
@@ -418,19 +498,12 @@ bool Store::Get(const std::string& key, KV* out, int32_t* code) const {
     return true;
 }
 
-int64_t Store::CurrentRevision() const {
-    std::string raw;
-    const leveldb::Status s = db_->Get(
-        leveldb::ReadOptions(), storekey::RevisionMetaKey(), &raw);
-    if (!s.ok()) {
-        return 0;
-    }
-    return static_cast<int64_t>(storekey::DecodeUint64(raw));
+int64_t Store::CompactRev() const {
+    std::shared_lock lock(db_mu_);
+    return CompactRevLocked();
 }
 
-// ---------------- Watch（M4） ----------------
-
-int64_t Store::CompactRev() const {
+int64_t Store::CompactRevLocked() const {
     std::string raw;
     const leveldb::Status s = db_->Get(
         leveldb::ReadOptions(), storekey::CompactRevKey(), &raw);
@@ -440,9 +513,19 @@ int64_t Store::CompactRev() const {
     return static_cast<int64_t>(storekey::DecodeUint64(raw));
 }
 
+// ---------------- Watch（M4） ----------------
+
 bool Store::ReplayEvents(int64_t from_revision, int64_t current_revision,
                          const std::string& key, int max_events,
                          std::vector<WatchEvent>* out, int32_t* code) const {
+    std::shared_lock lock(db_mu_);
+    return ReplayEventsLocked(from_revision, current_revision, key, max_events, out,
+                              code);
+}
+
+bool Store::ReplayEventsLocked(int64_t from_revision, int64_t current_revision,
+                               const std::string& key, int max_events,
+                               std::vector<WatchEvent>* out, int32_t* code) const {
     if (code) {
         *code = Code::OK;
     }
@@ -463,7 +546,7 @@ bool Store::ReplayEvents(int64_t from_revision, int64_t current_revision,
     // 二者都杜绝"读到不完整重放却未报 COMPACTED"。
     leveldb::ReadOptions ro;
     std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(ro));
-    const int64_t compact_rev = CompactRev();
+    const int64_t compact_rev = CompactRevLocked();
 
     // compact_rev = 被删 v/ 记录的最大 revision，故 (from, current] 内无洞 ⟺ from >= compact_rev。
     if (from_revision < compact_rev) {
@@ -510,23 +593,70 @@ bool Store::ReplayEvents(int64_t from_revision, int64_t current_revision,
     return true;
 }
 
+// ---------------- 快照 ----------------
+
+bool Store::ExportSnapshot(SnapshotData* out) const {
+    std::shared_lock lock(db_mu_);
+    leveldb::ReadOptions ro;
+    ro.snapshot = db_->GetSnapshot();
+    std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(ro));
+
+    // revision 与数据取自同一 LevelDB snapshot：保证跨节点对同一条日志分配相同
+    // revision（原实现数据与 revision 分开读，快照导出期间若有并发写会发散）。
+    out->set_revision(0);
+    it->Seek(storekey::RevisionMetaKey());
+    if (it->Valid() && it->key().ToString() == storekey::RevisionMetaKey()) {
+        out->set_revision(
+            static_cast<int64_t>(storekey::DecodeUint64(it->value().ToString())));
+    }
+
+    // 主索引（k/ 前缀）：当前 KV
+    for (it->Seek(storekey::MainKey("")); it->Valid() && it->key().starts_with("k/");
+         it->Next()) {
+        KV kv;
+        if (kv.ParseFromString(it->value().ToString())) {
+            out->add_kvs()->CopyFrom(kv);
+        }
+    }
+
+    // 配置版本索引（cfg/ 前缀）：随快照导出，新节点装快照后按版本读配置/历史仍可用
+    for (it->Seek("cfg/"); it->Valid() && it->key().starts_with("cfg/");
+         it->Next()) {
+        KV kv;
+        if (kv.ParseFromString(it->value().ToString())) {
+            out->add_cfg_kvs()->CopyFrom(kv);
+        }
+    }
+
+    db_->ReleaseSnapshot(ro.snapshot);
+    return true;
+}
+
 bool Store::LoadSnapshot(const SnapshotData& data, std::string* err) {
+    // 独占锁：重建 DB 期间禁止任何读/写/Compaction 访问 db_（防 use-after-free）
+    std::unique_lock lock(db_mu_);
     // 1. 关闭现有 DB
     db_.reset();
     // 2. 删除并重建目录（LevelDB 不允许直接在旧目录上重开）
     std::error_code ec;
     std::filesystem::remove_all(data_dir_, ec);
     // 3. 重新打开
-    if (!Open(data_dir_, err)) {
+    if (!OpenLocked(data_dir_, err)) {
         return false;
     }
-    // 4. 批量写入快照的主索引与历史版本
+    // 4. 批量写入快照的主索引/配置索引与历史版本
     leveldb::WriteBatch batch;
     for (const auto& kv : data.kvs()) {
         std::string serialized;
         kv.SerializeToString(&serialized);
         batch.Put(storekey::MainKey(kv.key()), serialized);
         batch.Put(storekey::VersionKey(kv.revision(), kv.key()), serialized);
+    }
+    // 配置版本索引随快照恢复（M2）：新节点装快照后 GetConfig(version>0)/GetHistory 可用
+    for (const auto& kv : data.cfg_kvs()) {
+        std::string serialized;
+        kv.SerializeToString(&serialized);
+        batch.Put(storekey::ConfigKey(kv.key(), kv.version()), serialized);
     }
     if (data.revision() > 0) {
         std::string raw;

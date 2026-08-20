@@ -11,6 +11,8 @@ LocalNode::LocalNode(std::unique_ptr<Store> store, WatchHub* hub)
     : store_(std::move(store)), hub_(hub) {}
 
 void LocalNode::Apply(const RaftCmd& cmd, ApplyResult* out) {
+    // 串行化写路径：等价于集群模式的 on_apply 串行调用（见头文件 mu_ 注释）
+    std::lock_guard<std::mutex> lock(mu_);
     ApplyCmdToStore(store_.get(), cmd, out);
     // 单机模式同样广播 Watch 事件（LocalNode 也要支持长轮询）
     if (hub_ && !out->events.empty()) {

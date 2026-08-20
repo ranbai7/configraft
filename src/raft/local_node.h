@@ -1,5 +1,6 @@
 #pragma once
 #include <memory>
+#include <mutex>
 
 #include "raft/node.h"
 #include "store/store.h"
@@ -45,6 +46,11 @@ private:
 
     std::unique_ptr<Store> store_;
     WatchHub* hub_;  // 不拥有
+
+    // 写路径串行化：集群模式由 braft on_apply 天然串行；单机模式 brpc 多 worker
+    // 并发调用 Apply，须在此串行，否则 Store 的 revision 读-改-写会拿到重复值
+    // （审查发现 H2——并发 Put/CAS 下全局 revision 重复、Watch 续传错乱）。
+    std::mutex mu_;
 };
 
 }  // namespace configraft
