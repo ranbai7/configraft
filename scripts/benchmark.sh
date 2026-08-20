@@ -89,13 +89,15 @@ start_cluster() {
 # 输出一行: 名字 QPS P99
 run_ghz() {  # name call data concurrency
     local name="$1" call="$2" data="$3" c="$4"
-    local out
+    local out qps p99
+    # set +e：grep 无匹配时不让 set -e 终止整个压测
+    set +e
     out="$("$GHZ" --insecure --proto "$REPO_ROOT/proto/configraft.proto" \
         --call "$call" -d "$data" -c "$c" -z "${DUR}s" \
         "127.0.0.1:$BENCH_LEADER" 2>&1)"
-    local qps p99
     qps="$(echo "$out" | grep -oP 'Requests/sec:\s*\K[\d.]+' | head -1)"
     p99="$(echo "$out" | grep -oP '99 % in \K[\d.]+' | head -1)"
+    set -e
     printf '%-14s c%-4s %s\n' "$name" "$c" "$(fmt "$qps" "$p99")"
 }
 
@@ -103,10 +105,22 @@ run_wrk() {  # name url [lua]
     local name="$1" url="$2" lua="${3:-}"
     local args=(-t 4 -c 100 -d "${DUR}s" -L)
     [[ -n "$lua" ]] && args+=(-s "$lua")
-    local out qps p99
+    local out qps p99_raw val p99
+    set +e
     out="$("$WRK" "${args[@]}" "$url" 2>&1)"
     qps="$(echo "$out" | grep -oP 'Requests/sec:\s*\K[\d.]+' | head -1)"
-    p99="$(echo "$out" | grep -oP '^\s*99\.?\d*%\s+\K[\d.]+(?=ms|s)' | head -1)"
+    # wrk 百分位形如 "     99%    467.00us" / "1.42ms"，值可能带 us/ms/s 单位。
+    # 提取"数值+单位"，统一换算成毫秒（与 ghz 的 ms 口径一致）。
+    p99_raw="$(echo "$out" | grep -oE '^\s*99% *[0-9.]+(us|ms|s)' | head -1)"
+    # 取最后一个数字串（"99%" 里的 99 不是值，用 tail 取真正的延迟值）
+    val="$(echo "$p99_raw" | grep -oE '[0-9.]+' | tail -1)"
+    case "$p99_raw" in
+        *us) p99="$(awk "BEGIN{printf \"%.2f\", ${val:-0}/1000}")" ;;
+        *ms) p99="$val" ;;
+        *s)  p99="$(awk "BEGIN{printf \"%.2f\", ${val:-0}*1000}")" ;;
+        *)   p99="$val" ;;
+    esac
+    set -e
     printf '%-14s      %s\n' "$name" "$(fmt "$qps" "$p99")"
 }
 
