@@ -31,6 +31,18 @@ Configraft 是一个轻量级、**强一致**的分布式键值存储系统，�
 
 ---
 
+## 演示
+
+**完整功能演示**（约 3 分钟）：集群状态 → KV 读写 → CAS 原子操作 → 配置发布 → **Watch 实时推送** → 版本链 → 一键回滚 → HTTP API 验证
+
+<p align="center"><img src="docs/images/configraft-demo.webp" width="80%"></p>
+
+**Leader 故障转移**：kill Leader 后集群自动重新选举，新 Leader 接管写请求
+
+<p align="center"><img src="docs/images/configraft-failover.webp" width="80%"></p>
+
+---
+
 ## 特性
 
 - ✅ **基础 KV**：`Put / Get / Delete / BatchPut`（gRPC + HTTP）
