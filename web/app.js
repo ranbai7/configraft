@@ -35,7 +35,20 @@ async function discover() {
     const h = await fetchJson("/healthz");
     state.leader = parseEndpoint(h.leader_id) || state.leader;
     const peers = (h.peers || []).map(parseEndpoint).filter(Boolean);
-    if (peers.length) state.nodes = peers;
+    if (peers.length) {
+      state.nodes = peers;
+    } else if (state.leader) {
+      // 兜底（审查发现 F3）：braft 的 list_peers 仅 Leader 返回成员，
+      // 从 Follower 打开页面时 peers 为空。改向 Leader 再查一次补全集群节点，
+      // 保证从任意节点打开 Dashboard 都能显示完整集群。
+      try {
+        const lh = await fetchJson(nodeUrl(state.leader, "/healthz"));
+        const lpeers = (lh.peers || []).map(parseEndpoint).filter(Boolean);
+        if (lpeers.length) state.nodes = lpeers;
+      } catch (e) {
+        // Leader 也暂不可达：保持现状，等待轮询自愈
+      }
+    }
   } catch (e) {
     const wrap = $("nodes");
     wrap.innerHTML =
@@ -126,6 +139,11 @@ async function doOp(kind) {
   const value = $("valueInput").value;
   const expect = $("expectInput").value;
   const ver = parseInt($("verInput").value, 10) || 0;
+  if (kind === "rollback" && ver <= 0) {
+    // 审查发现 F8：版本留空会退化为"回滚到最新"（无操作却报成功），改为明确提示。
+    showResult("回滚需指定目标版本（target_version > 0），如 1", true);
+    return;
+  }
   const enc = encodeURIComponent(key);
   let url, method = "POST", body = null;
 
