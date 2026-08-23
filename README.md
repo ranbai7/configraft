@@ -31,6 +31,30 @@ Configraft 是一个轻量级、**强一致**的分布式键值存储系统，�
 
 ---
 
+## 目录
+
+- [演示](#演示)
+- [特性](#特性)
+- [架构](#架构)
+- [技术栈](#技术栈)
+- [快速开始（Docker）](#快速开始docker)
+- [配置参数](#配置参数)
+- [核心 API](#核心-api)
+- [一致性保证](#一致性保证)
+- [目录结构](#目录结构)
+- [本地开发](#本地开发)
+- [测试](#测试)
+- [性能与验证](#性能与验证)
+- [代码审查与安全加固](#代码审查与安全加固)
+- [安全模型](#安全模型)
+- [已完成里程碑（M0–M8）](#已完成里程碑m0m8)
+- [文档](#文档)
+- [参与贡献](#参与贡献)
+- [致谢](#致谢)
+- [License](#license)
+
+---
+
 ## 演示
 
 **完整功能演示**（约 3 分钟）：集群状态 → KV 读写 → CAS 原子操作 → 配置发布 → **Watch 实时推送** → 版本链 → 一键回滚 → HTTP API 验证
@@ -61,29 +85,9 @@ Configraft 是一个轻量级、**强一致**的分布式键值存储系统，�
 
 ## 架构
 
-```
-┌───────────────────────────────────────────────────────────────┐
-│                    客户端 / SDK（跨语言）                        │
-│   gRPC(HTTP/2)   HTTP(RESTful)   HTTP(长轮询 Watch)   Dashboard│
-└───────────────┬───────────────────────────────────────────────┘
-                │              brpc 单端口多协议
-┌───────────────▼───────────────────────────────────────────────┐
-│             API / 服务层（brpc Server）                         │
-│  KVService  ConfigService  WatchService  AdminService  Dashboard│
-└───────────────┬───────────────────────────────────────────────┘
-┌───────────────▼───────────────────────────────────────────────┐
-│             Raft 层（braft）                                    │
-│  选主 / 日志复制 / Leader Lease 读 / 成员变更 / Snapshot / 故障转移│
-└───────────────┬───────────────────────────────────────────────┘
-┌───────────────▼───────────────────────────────────────────────┐
-│             复制状态机（串行 on_apply）                         │
-│  MVCC 写入 · 版本管理 · CAS · Watch 事件 · Compaction          │
-└───────────────┬───────────────────────────────────────────────┘
-┌───────────────▼───────────────────────────────────────────────┐
-│             存储层（LevelDB，每节点一份）                        │
-│  KV 数据(MVCC 多版本) · revision 索引 · 墓碑 · Raft 元数据       │
-└───────────────────────────────────────────────────────────────┘
-```
+Configraft 采用**分层 + 多副本**架构：每个节点自底向上为存储层 → 复制状态机 → Raft 层 → API 服务层，三个节点经 Raft 协议组成高可用集群，对外提供 gRPC / HTTP / Watch / Dashboard 统一接入。
+
+<p align="center"><img src="docs/images/configraft-architecture.svg" width="100%" alt="Configraft 系统架构图"></p>
 
 ### 数据流
 
@@ -179,6 +183,25 @@ ghz --insecure --proto proto/configraft.proto \
 ### Web Dashboard
 
 浏览器打开 `http://127.0.0.1:8001/dashboard`，可查看集群节点状态卡片、执行 KV / Config / CAS / 成员操作，并实时观察 Watch 事件流（配置变更 → 推送 → 订阅端）。详见 [docs/Dashboard操作指南.md](docs/Dashboard操作指南.md)。
+
+---
+
+## 配置参数
+
+`configraft_server` 的主要启动参数（gflags）：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--port` | `8000` | 监听端口（`run_cluster.sh` 使用 8001–8003） |
+| `--listen_ip` | `127.0.0.1` | 监听 IP，同时作为 Raft peer 地址 |
+| `--node` | *(空)* | 节点名（如 `node1`）；留空 = 单机模式（无 Raft） |
+| `--peers` | *(空)* | 集群节点列表，逗号分隔：`ip:port,ip:port`；留空 = 单机模式 |
+| `--data_dir` | `data` | LevelDB 数据目录 |
+| `--election_timeout_ms` | `1000` | Raft 选举超时（毫秒） |
+| `--web_dir` | `web` | Dashboard 静态资源目录 |
+| `--raft_sync` | `true` | 写日志是否 fsync 持久化；设 `false` 可显著提升写吞吐（压测/演示用，牺牲崩溃持久性） |
+
+> 单机模式示例：`./build/configraft_server --port 8100 --data_dir /tmp/cfg-m1`；集群启动脚本见 [scripts/run_cluster.sh](scripts/run_cluster.sh)。
 
 ---
 
@@ -283,6 +306,22 @@ bash scripts/run_cluster.sh stop      # 一条命令停止集群
 
 ---
 
+## 测试
+
+测试代码见 [tests/](tests/)，混沌演练脚本见 [scripts/chaos_test.sh](scripts/chaos_test.sh)。
+
+- **单元测试**（GoogleTest）：store（MVCC 语义）、watch（事件有序 / 背压）、raft_cas（CAS 并发原子性）。
+- **HTTP 集成测试**：真实拉起 server，验证 RESTful 路由分发、CORS 收紧、参数校验、错误码、内置服务关闭与 gRPC 共存。
+- **混沌测试**：kill Leader / kill Follower / 网络分区 / 节点重启，验证写线性一致、读一致、Watch 有序不丢、集群自动恢复。
+- **性能回归**：压测矩阵与复现方式见「[性能与验证](#性能与验证)」及 [docs/性能压测报告.md](docs/性能压测报告.md)。
+
+```bash
+ctest --test-dir build      # 4 个测试：store / watch / raft_cas / http
+bash scripts/chaos_test.sh  # 混沌演练
+```
+
+---
+
 ## 性能与验证
 
 ### 压测数据（2026-08 云服务器实测）
@@ -313,12 +352,6 @@ bash scripts/run_cluster.sh stop      # 一条命令停止集群
 **审查加固后复测（2026-08-20，锁开销验证）**：安全审查（commit e5d737b）引入 Store 共享互斥量与单机写锁后，在同环境（8 核阿里云）复测完整矩阵：**集群写路径 QPS 差异全部在 ±5% 内，读路径完全不受影响**——共享锁修复快照 UAF 的加固零性能代价。对比表与原始证据（环境指纹 + 二进制 md5 + 逐项原始输出）见 [docs/性能压测报告.md](docs/性能压测报告.md) §6。
 
 > 完整数据与复现方式见 [docs/性能压测报告.md](docs/性能压测报告.md)；`bash scripts/benchmark.sh --all --dur 10` 可一键复跑完整矩阵。
-
-### 验证
-
-- **混沌测试**：`scripts/chaos_test.sh` 执行 kill Leader / kill Follower / 网络分区 / 节点重启演练，验证写线性一致、读一致、Watch 有序不丢、集群自动恢复。
-- **单测 + HTTP 集成**：`ctest --test-dir build`（4 个测试）覆盖 MVCC 语义、Watch 有序/背压、CAS 并发原子性，以及 **HTTP/RESTful 路由集成**——真实拉起 server，验证路由分发、CORS 收紧、参数校验、错误码、内置服务关闭与 gRPC 共存。
-- **性能分析**：写路径热点（fsync）与优化过程详见 [docs/m7.md](docs/m7.md)。
 
 ---
 
@@ -362,6 +395,35 @@ bash scripts/run_cluster.sh stop      # 一条命令停止集群
 | M8 | 全项目代码审查与安全加固（9 项修复） | ✅ |
 
 **后续方向**：接口鉴权（令牌 / IP 白名单）、HTTP 路由层集成测试、apply 幂等（崩溃重放防护）、快照安装与读并发压测。
+
+---
+
+## 文档
+
+深入阅读项目的架构、设计与验证材料：
+
+| 分类 | 文档 | 内容 |
+|------|------|------|
+| 设计 | [项目概述.md](docs/项目概述.md) | 项目定位、架构决策与设计取舍 |
+| 设计 | [开发计划.md](docs/开发计划.md) | M0–M8 里程碑规划与验收标准 |
+| 设计 | [raft一致性算法.md](docs/raft一致性算法.md) | Raft 选主 / 日志复制 / 快照原理 |
+| 设计 | [LevelDB.md](docs/LevelDB.md) | LSM-Tree 存储引擎原理 |
+| 设计 | [watch.md](docs/watch.md) | Watch 长轮询与断点续传设计 |
+| 设计 | [m5.md](docs/m5.md) | M5：CAS 原子更新 + Leader Lease 线性一致读 |
+| 设计 | [m6.md](docs/m6.md) | M6：成员变更 + 健康检查 + Docker 集群 |
+| 设计 | [m7.md](docs/m7.md) | M7：性能优化 + 混沌压测 |
+| 验证 | [性能压测报告.md](docs/性能压测报告.md) | 2026-08 云主机实测完整数据与结论 |
+| 验证 | [安全审查报告.md](docs/安全审查报告.md) | 全项目审查：发现、修复与未修取舍 |
+| 运维 | [Dashboard操作指南.md](docs/Dashboard操作指南.md) | Dashboard 逐功能操作手册 |
+| 运维 | [演示脚本.md](docs/演示脚本.md) | 业务视角完整演示流程 |
+
+---
+
+## 参与贡献
+
+欢迎提交 Issue / PR。构建步骤、开发流程、提交规范与代码风格见 [CONTRIBUTING.md](CONTRIBUTING.md)；常见设计决策与使用问题见 [FAQ.md](FAQ.md)。
+
+如果 Configraft 对你有帮助，欢迎点个 ⭐。
 
 ---
 
