@@ -406,7 +406,7 @@ bash scripts/chaos_test.sh  # 混沌演练
 |------|------|------|
 | 设计 | [项目概述.md](docs/项目概述.md) | 项目定位、架构决策与设计取舍 |
 | 设计 | [开发计划.md](docs/开发计划.md) | M0–M8 里程碑规划与验收标准 |
-| 设计 | [raft一致性算法.md](docs/raft一致性算法.md) | Raft 选主 / 日志复制 / 快照原理 |
+| 设计 | [raft-and-braft.md](docs/raft-and-braft.md) | Raft 原理 + braft 源码分析 + Configraft 落地 |
 | 设计 | [LevelDB.md](docs/LevelDB.md) | LSM-Tree 存储引擎原理 |
 | 设计 | [watch.md](docs/watch.md) | Watch 长轮询与断点续传设计 |
 | 设计 | [m5.md](docs/m5.md) | M5：CAS 原子更新 + Leader Lease 线性一致读 |
