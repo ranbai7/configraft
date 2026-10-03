@@ -523,4 +523,4 @@ src/server/*                brpc 服务（KV/Config/Watch/Admin/Dashboard）
 
 ------
 
-*笔记维护记录：2026-08-13 创建；2026-08-25 重构为第一人称学习笔记，按"概念 → braft 源码精读 → Configraft 落地 → 问题"组织，新增 counter 示例精读，删除面试速查表。*
+*笔记维护记录：2026-08-13 创建；2026-08-25 重构为第一人称学习笔记，按"概念 → braft 源码精读 → Configraft 落地 → 问题"组织，新增 counter 示例精读，删除速查表。*

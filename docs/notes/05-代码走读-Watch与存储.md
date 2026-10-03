@@ -15,7 +15,7 @@
 | 实时性 | 毫秒级(轮询挂起) | 事件一到即推 |
 | 适用 | 演示/低规模订阅 | 大规模实时推送 |
 
-**取舍**：本项目面向"配置变更推送"这种低频事件 + 追求可演示/可 curl 验证 → 长轮询最务实。etcd v2 正是长轮询、v3 才上 gRPC 流；**诚实承认这是工程权衡而非最优解**即可（面试不丢分）。
+**取舍**：本项目面向"配置变更推送"这种低频事件 + 追求可演示/可 curl 验证 → 长轮询最务实。etcd v2 正是长轮询、v3 才上 gRPC 流；**诚实承认这是工程权衡而非最优解**即可（不失分）。
 
 ### 3.4.2 架构：一个 WatchHub，写路径是唯一事件源
 
@@ -155,7 +155,7 @@ Compaction 一轮(持 Store 共享锁, 与读并发):
 
 ---
 
-## 3.7 快照：Save / Load（新节点追平的弹药）
+## 3.7 快照：Save / Load（新节点追平的来源）
 
 ### 3.7.1 Save（Leader/Follower 都会定期做）
 
@@ -185,7 +185,7 @@ on_snapshot_load → Store::LoadSnapshot
    (因为快照只带当前状态、历史已被丢弃 ⇒ 旧 from_revision 一律按 COMPACTED 处理)
 ```
 
-**面试高频题"快照安装时的 UAF 怎么修"**：`LoadSnapshot` 会把 `db_` 指针 reset 并重建目录。若此刻并发读/Compaction 正在用旧 `db_`，就是悬垂指针 → UAF（审查 H1，HIGH）。修复 = Store 引入共享互斥量：**重建（LoadSnapshot）持独占锁，读/写/Compaction/快照导出持共享锁**（详见 4.3）。
+**高频题"快照安装时的 UAF 怎么修"**：`LoadSnapshot` 会把 `db_` 指针 reset 并重建目录。若此刻并发读/Compaction 正在用旧 `db_`，就是悬垂指针 → UAF（审查 H1，HIGH）。修复 = Store 引入共享互斥量：**重建（LoadSnapshot）持独占锁，读/写/Compaction/快照导出持共享锁**（详见 4.3）。
 
 ---
 
@@ -251,7 +251,7 @@ cfg/{key}/{ver:16hex} 配置版本索引                     EncodeOrd
 - `EncodeOrd`（16 位定宽 hex）：**字符字典序 == 数值序** → 扫 `v/` 前缀即按 revision 升序遍历、Seek 到 `v/{from+1}` 即可从某点开始。范围遍历/续传都靠它。
 - `EncodeUint64`（8 字节大端）：供 `DecodeUint64` 快速读写的计数器（meta 前缀），不需要按内容范围遍历。
 
-> 面试一句话："我让 revision 在磁盘上的编码保持字典序=数值序，于是'从第 N 个 revision 之后的历史'就变成一次前缀 Seek，Watch 历史重放、GetHistory、Compaction 全都复用它。"
+> 一句话讲清："我让 revision 在磁盘上的编码保持字典序=数值序，于是'从第 N 个 revision 之后的历史'就变成一次前缀 Seek，Watch 历史重放、GetHistory、Compaction 全都复用它。"
 
 ### 4.1.1 主索引里存什么
 
@@ -302,7 +302,7 @@ for 每条: 本批内分配 rev+i; 每条数据用本地递增的 rev 写 batch
                              ...PublishLocked(...) }
 ```
 
-> 面试一句话："我引入 shared_mutex 让快照重建与并发读互斥，但 shared_mutex 不是递归锁，公共方法嵌套调用会二次加锁 → 我把所有实现拆成公共方法 + *Locked 私有层，公共方法只加一次锁。加锁后同环境复测**没有任何一项变慢**（差异多为 ±5% 内，最大单格是 +7% 的提升）。"
+> 一句话讲清："我引入 shared_mutex 让快照重建与并发读互斥，但 shared_mutex 不是递归锁，公共方法嵌套调用会二次加锁 → 我把所有实现拆成公共方法 + *Locked 私有层，公共方法只加一次锁。加锁后同环境复测**没有任何一项变慢**（差异多为 ±5% 内，最大单格是 +7% 的提升）。"
 
 ### 4.3.3 ExportSnapshot 的一致性（呼应 3.7.1）
 
