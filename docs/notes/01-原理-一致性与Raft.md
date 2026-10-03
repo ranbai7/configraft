@@ -61,15 +61,115 @@
 ### 1.3.0 基本概念
 
 - **节点角色**：Leader（处理写）/ Follower / Candidate。正常时一个 Leader，其余 Follower。
-- **任期 Term**：单调递增的逻辑时钟，每次选举 +1。**任期是安全性的锚**——所有消息都带 term，term 大的消息才能覆盖 term 小的。
+- **任期 Term**：单调递增的逻辑时钟，**每次"真正发起的选举" +1**（braft 因为有 pre-vote，预投票阶段不推进 term，见 1.3.1）。**任期是安全性的锚**——所有消息都带 term，term 大的消息才能覆盖 term 小的。
 - **日志条目**：每台机器一份，`(term, index)` 全局唯一定位一条日志；`commitIndex` 已提交，`appliedIndex` 已应用。
-- **选举超时（Election Timeout）**：Follower 随机化（如 150–300ms）的计时器，超时未收到 Leader 心跳就发起选举。**随机化**避免所有节点同时竞选导致选票分裂。
+- **选举超时（Election Timeout）**：Follower 的随机化计时器，超时未收到 Leader 心跳就发起选举。**随机化**避免所有节点同时竞选导致选票分裂。**本项目实际区间是 [1000, 2000] ms**（不是教科书常写的 150–300ms），且**每次调度都重新抽一次随机数，包括第一次**。
 
 ### 1.3.1 选举（Leader Election）
 
-过程：Follower 超时 → term+1 转 Candidate → 先投自己 → 广播 `RequestVote` → 收到**多数派**投票（含自己）→ 成为 Leader → 立刻发心跳（AppendEntries，空日志也算）稳住任期。
+#### 教科书版本（先立一个正确基准）
 
-本项目落点：braft 默认选举超时 1000ms（`run_cluster.sh` 里配 `election_timeout_ms=1000`）；Leader 挂了约几秒内自动选出新 Leader。
+```text
+Follower 超时 → term+1 转 Candidate → 先投自己 → 广播 RequestVote
+  → 收到多数派投票（含自己）→ 成为 Leader → 立刻发心跳（AppendEntries，空日志也算）稳住任期
+```
+
+#### 本项目实际版本（braft：多两处机制、少一处默认前提）
+
+```text
+选举定时器到期（随机 [1000, 2000] ms）
+  ├─ 门槛一：还是 Follower 吗？自己的 follower lease 过期了吗？
+  │     过期了（或首次启动） → 继续
+  │     未过期（刚收到过 leader 心跳） → 直接返回，什么都不做
+  ├─ 清空 leader_id（"我联系不上老 leader 了"）
+  ├─ 【pre-vote 预投票】用 term = 当前 term + 1 试探性拉票，**自身 term 不变**
+  │     没拿到多数派 → 退回 Follower，重设定时器，term 一点都不涨
+  │     拿到多数派   → 继续
+  ├─ term += 1，转 Candidate，投自己一票          ← 教科书的"term+1 转 Candidate"在这里才发生
+  ├─ 广播 RequestVote（带新 term）
+  ├─ 拿到多数派（含自己）→ 成为 Leader
+  ├─ 追加一条「配置日志」（当前集群配置，等价 Raft 的 no-op）并提交
+  │     ← **提交成功那一刻 Leader Lease 才生效**（即 1.4 节一致读的前提）
+  └─ 之后每 100 ms 发一次空 AppendEntries 保活
+```
+
+#### 与教科书的偏差对照（面试常被追问）
+
+| | 教科书 | 本项目（braft） |
+|---|---|---|
+| term 何时 +1 | Follower 超时**立刻** +1 | **pre-vote 拿到多数派之后**才 +1 |
+| 自投的前提 | 无条件投自己 | **自己的 follower lease 过期**才投自己；否则挂个定时器等它过期 |
+| 新 Leader 第一件事 | 发空心跳 | **追加并提交一条配置日志**（no-op）；"空日志也算心跳"是之后的事 |
+| 超时时间 | 随机化（常见 150–300ms） | 随机化，但区间是 **[1000, 2000] ms** |
+
+#### 本项目实测时间参数（背下来）
+
+| 参数 | 值 | 由来 |
+|---|---|---|
+| 选举超时基准 | **1000 ms** | 启动参数 `--election_timeout_ms 1000` |
+| 选举超时**实际**区间 | **[1000, 2000] ms**，每轮重新随机 | 基准 + 最大 1000ms 抖动（`raft_max_election_delay_ms` 默认 1000） |
+| Leader 心跳间隔 | **100 ms** | = 选举超时 / 10（`raft_election_heartbeat_factor` 默认 10，且下限 10ms） |
+| Follower Lease | **2000 ms** | = 选举超时 1000 + 允许时钟漂移 1000（`max_clock_drift_ms` 默认 1000） |
+| 候选人等票超时 | **[2000, 3000] ms** | 选举超时 + 时钟漂移，再随机化 |
+| 节点**初始 term** | **1** | braft 全新启动的初值（注意不是 0） |
+
+#### 为什么集群总是从 term=2 开始（不是 bug）
+
+三步因果，一轮就完成：
+
+1. 节点初始 `term = 1`（braft 内置初值）；
+2. **pre-vote 不推进 term**——它只把 `term+1` 带出去试探；
+3. pre-vote 成功后进 `elect_self`，那里才 `term++` → **1 变 2**。
+
+> ⚠️ **常见误区**：不要讲成"同时启动 → 超时几乎同步 → 首轮 split vote → 第二次超时才在 term 2 选出 Leader"。**两条都不对**：
+> - 超时是随机的，**第一次**抽签就随机（[1000, 2000]），14 次实测里 13 次只有一个节点超时当选，根本没有竞争；
+> - term=2 是"初始 1 + pre-vote 成功 +1"的**必然结果**，不是重选出来的。即使真的撞上两个节点同轮竞争，也是**同一轮内两个节点都从 1 涨到 2**，而不是跨两个任期。
+>
+> 讲这一条的正确方式："集群从 term=2 开始，因为 braft 起手 term 就是 1，而 pre-vote 成功后 elect_self 会再 +1，所以第一次选举必然落在 term 2。"
+
+#### 启动首次选举 vs 运行期重新选举（实测对比）
+
+| 维度 | **启动首次选举** | **运行期重新选举** |
+|---|---|---|
+| 实测结果 | **term = 2**（14/14 次） | 旧 term **+1**（实测 2 → **3**） |
+| 实测耗时 | init → 发起选举 **1010 ~ 1512 ms** | `kill -9` → 新 Leader **约 2.17 s** |
+| follower lease 是否拦截 | **不拦**：首次启动（term==1 且从未投票）源码里直接做了 "first start, we can vote directly" 的 lease reset，视同已过期 | **拦**：leader 刚死时第一次定时器到期会被 lease 挡回，必须等 lease 过期 |
+| 投票依据 | 日志全空，谁都不比谁"新"，纯看随机化 | 按"**日志更新者优先**"投票，保证新 Leader 含全部已提交日志 |
+| 新 Leader 那条配置日志的含义 | 给空历史"盖章"，让 Lease 生效 | **把上一任期遗留的日志一并推成已提交**，同时让 Lease 生效 |
+
+**为什么 kill Leader 后要 ~2s 才重选**：最后一次心跳时刻记为 T，lease 在 T+2000ms 过期；选举定时器在 T+[1000,2000] 到期时**必然**被 lease 挡住（因为上界 2000 恰好等于 lease 时长），重新随机后再在 T+[1000,2000] 到期 → **实际发起选举落在 T+[2000, 4000]，均值约 3s**。实测 2.17s 落在区间低端。这个数字不是估的，是机制推出来的。
+
+#### 为什么要 pre-vote（反证，面试加分）
+
+> "如果没有 pre-vote，一个和集群网络分区的节点会不停超时、**term 一直自增**；等分区恢复，它带着一个超大 term 回来，就会把**健康的 Leader 顶下线**，白白触发一次重新选举。pre-vote 让'拿不到多数派的人根本没资格推进 term'，把这条路堵死了。"
+
+#### 选举超时 vs Follower Lease：两者重复吗？
+
+**不重复。它们是一对「驱动」与「否决」**——选举超时决定"**什么时候想选**"，Follower Lease 决定"**有没有资格选/投**"。
+
+| | 选举超时 | Follower Lease |
+|---|---|---|
+| 数值 | 基准 1000ms，**随机 [1000, 2000] ms** | 固定 **1000 + 1000 = 2000 ms** |
+| 为什么是这个值 | **必须随机**，否则大家同时抢票导致分裂 | **必须固定且带漂移冗余**，否则安全性无法用时钟论证 |
+| 本质 | 一个**定时器** | 一个**时间戳**（"最后一次确认 leader 还活着"是什么时候） |
+| 方向 | **触发**：到期就考虑发起选举 | **否决**：未过期就拒绝发起、拒绝投票 |
+| 谁重置它 | 每收到一次心跳就重置（并重新随机） | 每收到一次心跳就续期 |
+| 违反的后果 | 机制不工作（选不出 Leader） | **安全性被破坏**（推翻健康 Leader） |
+
+**反证（面试必答）**：
+
+> "假设**只有选举超时、没有 Follower Lease**：一个 Follower 因为自身 GC 停顿或网络抖动，在 1000ms 内没收到心跳就发起选举——但 Leader 其实活着，只是心跳被延迟了。如果它恰好拉到多数派，就会用一个更大的 term 把**健康的 Leader 顶掉**。这就是 Raft 论文里的 **disruptive server（破坏性服务器）问题**。
+>
+> Follower Lease 堵的就是这条路：**在同一个时间窗内，所有 Follower 都还相信老 Leader 活着，因此谁都不投票**——而且代码里连**候选人自己都不投给自己**（自投前也先看 lease，没到期就挂个定时器等它过期）。所以这个窗口内**根本凑不出多数派**，健康 Leader 不可能被推翻。"
+
+**`max_clock_drift_ms`（默认 1000）是干什么的**：Follower Lease 是一套**基于本地时钟的安全性论证**——Follower 用**自己的**时钟判断"老 Leader 是不是已经不可能再拿到多数派确认了"。不同机器时钟速率会漂移，所以必须留冗余：那个"别人都别投票"的等待期是 `election_timeout + max_clock_drift`（1000+1000=2000ms）。
+
+这也解释了**为什么 lease 必须所有 peer 一致开启、且 `election_timeout_ms`/`max_clock_drift_ms` 配置必须一致**：配置一旦不一致，这道"窗口内谁都别投"的闸门就出现缺口，安全性论证就破了。项目在 `server_main.cpp` 里**强制**打开 leader lease（用户命令行传 false 会被静默覆盖），就是防部署漏开。
+
+**两个值得主动说的细节**：
+
+1. **首次启动的特例**（实测验证）：源码里有一段直译过来是"首次启动可以直接投票"的逻辑——全新集群（term==1 且从未投过票）会把 follower lease 直接重置为"已过期"。这是合理的：**全新集群本来就没有老 Leader 需要保护**，省掉 2 秒冗余期。所以实测首次选举在 init 后 1.0~1.5s 就发生了。
+2. **一处不对称**（认真看代码才发现）：follower lease 的"过期"判断**不看** leader lease 开关，永远生效；而"投票闸门"在开关关闭时会直接放行。也就是说关掉开关后，"别发起选举"还管着，"别投票"就不管了——**安全性是这套组合论证一起成立的，拆掉任何一半都不安全**。
 
 ### 1.3.2 日志复制（Log Replication）
 
@@ -139,16 +239,29 @@ Follower 可能缺日志/多日志/有冲突（曾宕机、曾脑裂）。Leader
 | 方案 | 思路 | 优点 | 缺点 | 代表 |
 |---|---|---|---|---|
 | **Quorum（多数派）读** | 读也进 Raft：读当前 commitIndex 的 Quorum，读最新 | 实现简单直接 | 每次读一次 RPC，吞吐上不去 | ZooKeeper sync 读等 |
-| **ReadIndex** | Leader 先跟多数派确认"我仍是 Leader"并取回 commitIndex，**本地等 applied≥commitIndex 后**本地读 | 读只需一次轻量 Quorum 心跳；吞吐高 | 需要框架支持 | etcd（老版本）、TiKV、**新 braft** |
+| **ReadIndex** | Leader 先跟多数派确认"我仍是 Leader"并取回 commitIndex，**本地等 applied≥commitIndex 后**本地读 | 读只需一次轻量 Quorum 心跳；吞吐高 | 需要框架支持 | **etcd v3**（ReadIndex 正是 v3 引入的）、TiKV |
 | **Lease（租约）读** | Leader 利用"最近收到过多数派心跳/确认"作为"我是唯一 Leader"的证据，到期前本地读 | 读**零 RPC**，纯本地 → 吞吐最高 | 依赖时钟/lease 参数；可用性窗口略差 | 本项目（braft lease）、etcd 早期 |
 
-**etcd 的演进正是个绝佳的对照素材**：etcd v2 时代读是"leader 直接读 + lease"，后来为绕开 lease 的时钟依赖、让 Follower 也能做一致读，v3 才引入基于 **ReadIndex** 的方案。而**本项目选 Lease 是被动且正确的**——braft v1.1.2 这个版本**根本没有暴露 ReadIndex API**（作者搜过源码确认），所以走它内置的 leader lease。
+**etcd 的演进正是个绝佳的对照素材**：etcd v2 时代读是"leader 直接读 + lease"，后来为绕开 lease 的时钟依赖、让 Follower 也能做一致读，**v3 才引入基于 ReadIndex 的方案**。而**本项目选 Lease 是被动且正确的**——braft v1.1.2 这个版本**根本没有暴露 ReadIndex API**（本项目全量搜过 vendored 源码确认，无 `read_index` 相关符号），所以走它内置的 leader lease。
+
+> **⚠️ 注意两处不要讲反**：① **ReadIndex 属于 etcd v3（更新的版本）**，v2 用的是 lease，别写成"etcd 老版本用 ReadIndex"；② 只能说"**本项目用的 braft v1.1.2 没有 ReadIndex**"，**不要断言"braft 新版有没有"**——那超出本仓库能验证的范围，被追问会答不上来。
 
 ### 1.4.3 本项目的一致性读设计（预告，04 章完整证明）
 
 **braft 的内置 leader lease 机制**：开启 `FLAGS_raft_enable_leader_lease` 后，Leader 通过周期性成功的多数派心跳/响应**续租**；lease 有效期内：
 - Leader 认为自己是"稳定 Leader"（不会被静默赶下台）；
 - **Follower 也遵守该 lease**——lease 有效期间不会给"任期更高"的候选者投票、不发起新选举（这是"所有节点必须一致开启"的原因）。
+
+> **⚠️ 一个容易混淆的点：braft 里其实有"两个 lease 对象"，名字都带 leader，但不是同一个东西**
+>
+> | | **Leader Lease**（Leader 侧） | **Follower Lease**（Follower 侧） |
+> |---|---|---|
+> | 回答的问题 | "我还能不能安全地做**本地读**？" | "我能不能**投票 / 发起选举**？" |
+> | 时长 | **1000 ms**（= election_timeout） | **2000 ms**（= election_timeout + 时钟漂移） |
+> | 状态 | VALID / NOT_READY / EXPIRED / SUSPECT | 未过期 / 已过期（就两个状态） |
+> | 谁在用 | 本项目的 `WaitLeaderLease` 一致读闸门 | 选举与投票的门槛（见 1.3.1 末尾） |
+>
+> 两者都靠"与多数派的心跳往返"续期，但**判据和时长不同**。面试时如果被问"leader lease 多久"，先反问一句"您指的是读用的那个还是投票用的那个"——这一下就把深度拉出来了（详见 1.3.1 末尾「选举超时 vs Follower Lease」）。
 
 于是 Lease 读的完整逻辑（本项目 `RaftNode::Get`，`src/raft/raft_node.cpp:166`）：
 
@@ -187,10 +300,16 @@ Follower 可能缺日志/多日志/有冲突（曾宕机、曾脑裂）。Leader
 1. 用配置改动的例子讲清线性一致 vs 顺序一致 vs 最终一致；本项目各操作属哪种？
 2. 解释"为什么同步日志而非同步状态"；SMR 的三个条件是什么？
 3. 复述 Raft 选举/复制/提交的流程；多数派为什么两两相交？
-4. 说出安全性五不变量的名字；**Leader Completeness** 为什么是 Lease 读的前提？
-5. 讲出"Leader 直接本地读为什么不线性一致"的两个滞后场景。
-6. 对比 Quorum/ReadIndex/Lease 三种一致读方案，说出本项目选 Lease 的直接原因。
-7. Lease VALID 在 braft 里为什么需要"所有 peer 一致开启"？（Hint：Follower 也要遵守 lease 不投票。）
+4. **本项目（braft）的选举比教科书多了哪两处机制、少了一处什么前提？**（Hint：pre-vote / 自投也要看 lease / 新 Leader 先提交配置日志）
+5. **说出本项目实测的选举时间参数**：选举超时基准与随机区间、心跳间隔、Follower Lease、候选人等票超时、节点初始 term。
+6. **集群为什么总是从 term=2 开始？** 请给出因果链，并说明"首轮 split vote 导致第二次超时才选出"这个说法错在哪。
+7. **选举超时和 Follower Lease 作用重复吗？** 用一个反证说明没有 Follower Lease 会坏在哪。
+8. **启动首次选举和运行期重新选举有什么不同？**（Hint：lease 拦不拦、耗时、term 怎么变）
+9. 说出安全性五不变量的名字；**Leader Completeness** 为什么是 Lease 读的前提？
+10. 讲出"Leader 直接本地读为什么不线性一致"的两个滞后场景。
+11. 对比 Quorum/ReadIndex/Lease 三种一致读方案，说出本项目选 Lease 的直接原因。
+12. Lease VALID 在 braft 里为什么需要"所有 peer 一致开启"？（Hint：Follower 也要遵守 lease 不投票。）
+13. **braft 里"两个 lease 对象"分别是什么？各自回答什么问题、时长各是多少？**
 
 ---
 **下一篇**：[02-原理-brpc与存储.md](02-原理-brpc与存储.md)——为什么系统能快：bthread 与 LevelDB。

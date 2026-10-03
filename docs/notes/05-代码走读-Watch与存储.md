@@ -80,7 +80,7 @@ WatchService::Rest → node_->Watch → WatchHub::Watch
 
 ### 3.4.7 WatchHub 并发模型（背诵要点）
 
-- 锁序：**`hub_mu_` → waiter->mu**（单向加锁，避免死锁）。
+- 锁序：**`WatchHub::mu_` → `Waiter::mu`**（单向加锁，避免 ABBA 死锁；注意成员名就叫 `mu_`，不是 `hub_mu_`）。
 - Broadcast：先拷 **weak_ptr 快照**（放锁后再逐个 lock），避免持 hub 锁做耗时操作；对不匹配 key 的 waiter 用 `Waiter::Matches` 过滤。
 - 等待循环挂 **bthread cv**（原因见 02 章：不占 pthread worker，可承载海量长轮询）。
 
@@ -302,7 +302,7 @@ for 每条: 本批内分配 rev+i; 每条数据用本地递增的 rev 写 batch
                              ...PublishLocked(...) }
 ```
 
-> 面试一句话："我引入 shared_mutex 让快照重建与并发读互斥，但 shared_mutex 不是递归锁，公共方法嵌套调用会二次加锁 → 我把所有实现拆成公共方法 + *Locked 私有层，公共方法只加一次锁。加锁后同环境复测性能零回退（±5% 内）。"
+> 面试一句话："我引入 shared_mutex 让快照重建与并发读互斥，但 shared_mutex 不是递归锁，公共方法嵌套调用会二次加锁 → 我把所有实现拆成公共方法 + *Locked 私有层，公共方法只加一次锁。加锁后同环境复测**没有任何一项变慢**（差异多为 ±5% 内，最大单格是 +7% 的提升）。"
 
 ### 4.3.3 ExportSnapshot 的一致性（呼应 3.7.1）
 

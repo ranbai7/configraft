@@ -38,7 +38,9 @@
 ```
 
 **修复**：换成 **`bthread::Mutex` + `bthread::ConditionVariable`**（见 `src/raft/state_machine.h` 的 `WaitState`）。挂起的是 bthread，4 个 worker 得以继续跑 on_apply 与网络回调。
-**权衡记录**：期间还试过 bthread 轮询 `bthread_usleep`（慢）、`bthread::butex`（在 pthread 上下文挂死无法唤醒，弃用）——最后 `bthread cv` 是正确且足够快的方案。这些试错本身就是最好的面试素材（详见 06 章）。
+**权衡记录**：期间还试过 bthread 轮询 `bthread_usleep`（慢）、`bthread::butex`（在 pthread 上下文挂死无法唤醒，弃用）——最后定为 `bthread cv`。这些试错本身就是最好的面试素材（详见 06 章）。
+
+> **⚠️ 但这不是纯粹的胜利，是一个显式取舍**：4 核 VM 同条件 c8 下，修复后的 bthread cv 版 **2912 QPS**，而原来的 `std::cv` 版是 **7813 QPS——慢约 3 倍**。原因是 4 核 VM 上 bthread 的调度开销**大于**"释放 worker"带来的收益。仍然选它，是因为**"节点假死"是正确性缺陷而非性能问题**，而配置中心的真实写并发远低于压测值——**稳定性优先于吞吐**（8 核上这个差距被摊薄，但 `std::cv` 的假死风险依旧）。**面试时主动把"慢 3 倍"讲出来，比只讲"我修好了"更能体现工程判断力。**
 
 > 面试一句话："在 brpc 里写服务，**凡是可能等待的同步，都必须用 bthread 原语**；用 std 同步会把底层的 4 个 pthread worker 全部挂死，高并发下表现为假死。我们压测时真实复现并修复过这个 bug。"
 
@@ -86,7 +88,9 @@ HTTP Watch 长轮询会"挂起等待事件最多 30s"。如果每挂一个长轮
 
 1. **WriteBatch 原子性**：多个写打包进一个 `WriteBatch`，**要么全部生效、要么全不生效**。本项目把"业务数据写 + revision 递增 + cfg 索引"放进**同一个 WriteBatch 原子提交**（04/05 章详述）——这是状态一致的关键。
 2. **Snapshot（快照）**：`db->GetSnapshot()` 钉住一个一致的读视图，之后的读都基于该视图，不被并发写/Compaction 干扰。本项目用它做**一致性快照导出**（导出 revision + k/ + cfg/ 三部分，保证跨节点一致）。
-3. **有序迭代器**：`Iterator` 天然按键字典序遍历。本项目把 revision 编成**保序的 16 进制 key**，扫 `v/` 前缀即按 revision 升序遍历历史——MVCC 历史查询和 Watch 历史重放都靠它（05 章）。
+3. **有序迭代器**：`Iterator` 天然按键字典序遍历。本项目把 revision / version 编成**保序的 16 进制**编码，于是"按前缀扫"就等价于"按版本升序遍历"。**两个前缀各管一摊（容易记混）**：
+   - `v/{rev:16hex}/{key}` 前缀 → **Watch 历史重放**、**Compaction** 扫描；
+   - `cfg/{key}/{ver:16hex}` 前缀 → **GetHistory** 按版本列历史（注意它走的是 `cfg/`，不是 `v/`）。
 
 ### 2.2.4 为什么"串行单写 + 无事务"对本项目不是缺点（关键论证）
 
@@ -104,7 +108,12 @@ LevelDB 本身只支持**单写者**（写线程要拿同一把锁），且**没
 ### 2.2.5 fsync：Raft 持久性的"价签"
 
 - WAL 写是**追加到 OS page cache** 就返回（快），**fsync** 才真正落盘。
-- 本项目 `--raft_sync` 控制 braft 日志落盘是否 fsync。压测显示：**fsync 开/关，写吞吐相差约 8–10 倍**（3 节点写 ×64：10.0k vs 28.2k QPS）。这就是"崩溃不丢已提交日志"的代价。
+- 本项目 `--raft_sync` 控制 braft 日志落盘是否 fsync。**fsync 是写路径最大热点**，但差距随并发变化，**别把倍数说成一个固定值**：
+  - **低并发（c8）差 8–10 倍**：3 节点 1.8k → 15.9k QPS；5 节点 1.2k → 13.0k QPS；
+  - **高并发（×64）差约 2.8 倍**：3 节点 10.0k → 28.2k QPS。
+
+  > 为什么高并发下差距缩小？因为并发上来后瓶颈从"每次写的 fsync 等待"转移到了其他环节（Raft 复制批处理、CPU）。
+  > **面试建议**：报"8–10 倍"时**一定要带上并发度**，否则拿 ×64 的数一除（28.2/10.0=2.8）就自相矛盾了。这就是"崩溃不丢已提交日志"的代价——生产必须开。
 - 面试解释：Raft 说"多数派持久化后提交"——**不 fsync 的话"持久化"是假的**（OS 崩溃/断电会丢），所以生产必须开；压测关掉只是为了看"代码本身能到多快"的上限。默认部署 fsync 开。
 
 ---
@@ -140,11 +149,65 @@ etcd 的启示（本项目基本复刻了 etcd 的模型）：
 ### 2.3.4 MVCC vs 覆盖写的代价与回收
 
 - **代价**：每次写都追加 → 历史无限增长 → 需要 **Compaction 回收**（每 key 保留最近 N 版，默认 10，见 `server.cpp`），并把已回收的最高 revision 记为 `compact_rev` 水位线。
-- **边界语义**：被回收的历史（from_revision < compact_rev）不再可读 → Watch 返回 `COMPACTED`、GetHistory 返回 `VERSION_NOT_FOUND`，客户端从新锚点重建（05 章详述）。
+- **边界语义（两个接口的表现不一样，别混）**：被回收的历史（from_revision < compact_rev）不再可读——
+  - **Watch** 会明确返回错误码 `COMPACTED`，客户端从新锚点重建；
+  - **GetHistory** 的签名是 `void GetHistory(key, std::vector<KV>*)`，**不产出任何错误码**——被回收的版本只是**不再出现在返回的列表里**；
+  - 而 `VERSION_NOT_FOUND`（`code=4`）来自**另一个接口** `GetConfig(key, version)`：它按 `cfg/{key}/{ver}` 精确取某个版本，取不到才报这个码（详见 05 章）。
 
 ### 2.3.5 "逻辑时钟 vs 物理时间戳"
 
 用 revision 而非 `wall-clock 时间戳` 的好处：**单调、无时钟漂移、天然全局有序**（Leader 串行分配），且**与日志序一致**。物理时钟在多机间会回拨/漂移，不能当版本号。这点被问"为什么用自增号不用时间戳"时要答得上来。
+
+---
+
+## 2.4 第三方依赖是怎么进入项目的（braft / brpc / LevelDB）
+
+> 面试高频追问："braft 和 LevelDB 你是怎么用的？把源码拷进项目了吗？改了吗？"这一节就是标准答案——**三句话：外置构建、头文件+库引用、源码零改动（只给 braft 打了两个构建期补丁）**。
+
+### 2.4.1 三种进入方式
+
+| 依赖 | 怎么来的 | 怎么被项目用上 |
+|---|---|---|
+| protobuf 3.21.12 / brpc 1.17.0 / braft 1.1.2 / googletest | `scripts/build_deps.sh` 从 GitHub tarball 下载**源码**（主源不可达时自动回退 `codeload.github.com`），用 CMake 构建后**安装到 `third_party/install/`**（约 148 MB） | **头文件 + 库**：CMake 里 `include_directories(SYSTEM .../include)` + `link_directories(.../lib)`，再按"上层库在前"的顺序链 `braft → brpc → protobuf → leveldb → …` |
+| **LevelDB** / gflags / ssl | **系统包**（apt 装的 `libleveldb-dev` 等），**不自己构建** | 直接链接系统库 |
+| 项目自己的代码 | `src/` 源码 | 打成静态库 `configraft_core`，server / client / tests 复用 |
+
+**关键点：依赖源码不在项目代码树里。** `third_party/` 整个在 `.gitignore` 中（源码与安装产物都不入库），仓库里只有构建脚本。所以 clone 下来必须先跑 `build_deps.sh`；CI 里用 `actions/cache` 缓存这 148MB——**首次构建 30–60 分钟，命中缓存 <5 分钟**。
+
+### 2.4.2 对依赖源码做了什么修改
+
+**只对 braft 做了两处构建期补丁**（`build_deps.sh` 里用 `sed -i` 就地改，不是打 patch 文件）：
+
+1. **删掉 braft 多处 CMakeLists 里的 `-D__const__=`** —— 这个宏在新版 glibc（≥2.35）下会导致编译失败；
+2. **`util.cpp` 里 `detail::Sample<Stat>` → `Sample<Stat>`** —— braft v1.1.2 假设老版 brpc 存在 `detail::detail` 嵌套命名空间，brpc ≥1.10 已移除它。
+
+**brpc / protobuf / LevelDB 零修改**，只有构建参数上的选择：protobuf 必须 `WITH_ZLIB=ON`（否则 brpc 的 gzip 流不可用）；brpc 关掉自带工具与 glog。
+
+### 2.4.3 ⭐ "MVCC 是你改了 LevelDB 吗？"——不是
+
+这是最容易被误解的一点。项目里 LevelDB 的用法素到不能再素：
+
+```cpp
+leveldb::Options opts;
+opts.create_if_missing = true;
+leveldb::DB::Open(opts, data_dir, &db);
+```
+
+**没有自定义 Comparator、没有 MergeOperator、没有自定义 Env、没有动 LevelDB 一行源码。**
+
+**MVCC 是项目自己"搭"在 LevelDB 的裸 KV 接口之上的**，靠三件事：
+
+1. **Key 编码**（`src/common/storekey.*`）—— 把"版本"编进 key（`k/` `v/{rev}/` `cfg/` `meta/`），而不是改引擎；revision 用**定长 16 进制**编码，借 LevelDB 的字节序排序天然得到"同一 key 的历史按版本递增有序"；
+2. **全局 revision 计数器** —— 读 `meta/revision` 再 +1；
+3. **并入业务写的同一个 WriteBatch** 原子提交（杜绝"revision 推进了但数据没落盘"）。
+
+LevelDB 真正被用到的能力只有 **3 个**：`WriteBatch`（原子批写）、`GetSnapshot / ReleaseSnapshot`（一致性快照导出）、有序 `Iterator`（按前缀扫历史）——正好就是 2.2.3 说的那三条。
+
+**面试话术**：
+
+> "MVCC 不是 LevelDB 给我的，是我在它的 KV 接口上自己实现的——LevelDB 只提供'按 key 排序的字节 KV + 原子批写 + 一致性快照'这三样，我把'版本'这一维编进了 key 里，再配一个全局逻辑时钟。好处是**换存储引擎（比如上 RocksDB）时，MVCC 语义这块代码基本不用动**。"
+
+**顺便分清一个容易混的点**：LevelDB 内部确实有 SequenceNumber、也维护多版本（为了它自己的快照读），但那是**引擎内部实现**，不暴露成用户可见的版本语义；项目的 revision 是**业务层自建的逻辑时钟**，跟 LevelDB 的 sequence number 毫无关系。
 
 ---
 
@@ -156,6 +219,9 @@ etcd 的启示（本项目基本复刻了 etcd 的模型）：
 4. 论证"为什么 LevelDB 单写者+无事务对本项目不是缺点"。
 5. 解释 fsync 开/关为什么差 8~10 倍；Raft 的"持久化"和生产环境为何必须 fsync。
 6. revision vs version 的区别；revision 的三个用途；为什么不用物理时间戳。
+7. **第三方依赖是以什么形式进入项目的？** 哪些是源码构建、哪些用系统库？为什么不把源码放进项目仓库？
+8. **对依赖源码做了哪些修改？** 只改过什么、为什么改？
+9. 如果面试官问"你为了做 MVCC 把 LevelDB 改成什么样了"，你怎么回答？（Hint：一行没改，MVCC 建在裸 KV 之上）
 
 ---
 **下一篇**：[03-协议与抽象层.md](03-协议与抽象层.md)——代码结构是怎么组织起来的。
