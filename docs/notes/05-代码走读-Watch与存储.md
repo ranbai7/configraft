@@ -53,7 +53,7 @@ WatchService::Rest → node_->Watch → WatchHub::Watch
       历史被回收→ code=COMPACTED + current_revision(供重建)
 ```
 
-### 3.4.4 断点续传的锚点语义（最容易被问的细节）
+### 3.4.4 断点续传的锚点语义（最易误解的细节）
 
 **`current_revision` 是下一次请求的 `from_revision`。** 规则：
 
